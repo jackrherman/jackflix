@@ -119,6 +119,21 @@ async function showLoginScreen() {
 
   buildPinKeypad()
   document.getElementById('pinBack').addEventListener('click', showProfilePicker)
+  document.addEventListener('keydown', onPinKeydown)
+}
+
+function onPinKeydown(e) {
+  const pinScreen = document.getElementById('pinScreen')
+  if (pinScreen.classList.contains('hidden')) return
+  if (e.key >= '0' && e.key <= '9') {
+    onPinKey(e.key)
+  } else if (e.key === 'Backspace') {
+    _pinEntry = _pinEntry.slice(0, -1)
+    updatePinDots()
+    document.getElementById('pinError').classList.add('hidden')
+  } else if (e.key === 'Escape') {
+    showProfilePicker()
+  }
 }
 
 function showPinScreen(profile) {
@@ -193,6 +208,7 @@ async function submitPin() {
       const { token } = await res.json()
       localStorage.setItem('jf_token', token)
       serverToken = token   // player.js global
+      document.removeEventListener('keydown', onPinKeydown)
       document.getElementById('loginScreen').classList.add('hidden')
       init()
     } else {
