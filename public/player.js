@@ -7,6 +7,11 @@ var tmdb = (ep, p = {}) => {
   return fetch(url).then(r => r.json())
 }
 
+// ── SERVER AUTH TOKEN ─────────────────────────────────────────────────────────
+// Set by app.js after login or checkAuth(). Used by syncCW / loadCWFromServer.
+
+var serverToken = localStorage.getItem('jf_token') || null
+
 // ── PLAYER STATE ──────────────────────────────────────────────────────────────
 
 let currentPlayer        = null
@@ -49,6 +54,7 @@ function cwSave() {
   const entries = Object.entries(store).sort((a,b) => b[1].ts - a[1].ts)
   const trimmed = Object.fromEntries(entries.slice(0, 50))
   localStorage.setItem(CW_KEY, JSON.stringify(trimmed))
+  syncCW()   // fire-and-forget — push to server in background
 }
 
 function cwAll() {
@@ -70,6 +76,56 @@ function cwRecent() {
     .filter(e => e.pct > 0.02 && e.pct < 0.95)
     .sort((a, b) => b.ts - a.ts)
     .slice(0, 20)
+}
+
+// ── SERVER SYNC ───────────────────────────────────────────────────────────────
+// Push local CW to server after every save; pull and merge on page load.
+// Both functions are silent — network errors never interrupt the UI.
+
+async function syncCW() {
+  if (!serverToken) return
+  try {
+    const res = await fetch('/api/cw', {
+      method:  'PUT',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${serverToken}`,
+      },
+      body: JSON.stringify(cwAll()),
+    })
+    if (res.status === 401) {
+      serverToken = null
+      localStorage.removeItem('jf_token')
+      return
+    }
+    if (res.ok) {
+      const merged = await res.json()
+      localStorage.setItem(CW_KEY, JSON.stringify(merged))
+    }
+  } catch(_) {}
+}
+
+async function loadCWFromServer() {
+  if (!serverToken) return
+  try {
+    const ctrl    = new AbortController()
+    const timeout = setTimeout(() => ctrl.abort(), 3000)
+    const res = await fetch('/api/cw', {
+      headers: { 'Authorization': `Bearer ${serverToken}` },
+      signal:  ctrl.signal,
+    })
+    clearTimeout(timeout)
+    if (!res.ok) return
+    const serverCW = await res.json()
+    const localCW  = cwAll()
+    const merged   = { ...localCW }
+    for (const [key, entry] of Object.entries(serverCW)) {
+      if (!merged[key] || (entry.ts || 0) > (merged[key].ts || 0)) {
+        merged[key] = entry
+      }
+    }
+    localStorage.setItem(CW_KEY, JSON.stringify(merged))
+  } catch(_) {}
 }
 
 // ── OPEN PLAYER ───────────────────────────────────────────────────────────────

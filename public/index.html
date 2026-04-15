@@ -8,6 +8,32 @@
 </head>
 <body>
 
+  <!-- ── LOGIN SCREEN ──────────────────────────────────────────────────── -->
+
+  <div class="login-screen hidden" id="loginScreen">
+
+    <!-- Profile picker -->
+    <div class="profile-picker" id="profilePicker">
+      <h1 class="profile-heading">Who's watching?</h1>
+      <div class="profile-cards" id="profileCards"></div>
+    </div>
+
+    <!-- PIN entry -->
+    <div class="pin-screen hidden" id="pinScreen">
+      <p class="pin-for" id="pinFor"></p>
+      <div class="pin-dots">
+        <div class="pin-dot"></div>
+        <div class="pin-dot"></div>
+        <div class="pin-dot"></div>
+        <div class="pin-dot"></div>
+      </div>
+      <p class="pin-error hidden" id="pinError">Incorrect PIN. Please try again.</p>
+      <div class="pin-keypad" id="pinKeypad"></div>
+      <button class="pin-back" id="pinBack">← Back to profiles</button>
+    </div>
+
+  </div>
+
   <!-- ── BROWSE UI ──────────────────────────────────────────────────────── -->
 
   <nav class="nav" id="nav">

@@ -1290,3 +1290,141 @@ body {
 
 /* Hidden utility */
 .hidden { display: none !important; }
+
+/* ── LOGIN SCREEN ──────────────────────────────────────────────────────────── */
+
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-heading {
+  font-size: 28px;
+  font-weight: 600;
+  color: #fff;
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.profile-cards {
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.profile-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 16px;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.profile-card:hover { background: rgba(255,255,255,0.08); }
+
+.profile-avatar {
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  background: var(--red);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.profile-name {
+  font-size: 14px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+
+/* PIN screen */
+
+.pin-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.pin-for {
+  font-size: 18px;
+  color: #fff;
+  font-weight: 500;
+  text-align: center;
+}
+
+.pin-dots {
+  display: flex;
+  gap: 20px;
+}
+
+.pin-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.35);
+  transition: all 0.15s;
+}
+
+.pin-dot.filled {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.pin-error {
+  font-size: 14px;
+  color: #f87171;
+  text-align: center;
+  min-height: 1.2em;
+}
+
+.pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 72px);
+  gap: 10px;
+}
+
+.pin-key {
+  height: 56px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s;
+  user-select: none;
+}
+
+.pin-key:hover  { background: rgba(255,255,255,0.22); }
+.pin-key:active { background: rgba(255,255,255,0.32); }
+.pin-key-special { font-size: 14px; }
+
+.pin-back {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 8px 16px;
+  border-radius: 4px;
+  transition: color 0.2s;
+  margin-top: 4px;
+}
+
+.pin-back:hover { color: #fff; }

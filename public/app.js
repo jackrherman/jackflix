@@ -13,10 +13,13 @@ const ROWS = [
 
 // ── STATE ─────────────────────────────────────────────────────────────────────
 
-let activeFilter  = 'all'
-let searchTimeout = null
-let modalItem     = null
-let modalType     = null
+let activeFilter      = 'all'
+let searchTimeout     = null
+let modalItem         = null
+let modalType         = null
+let setupDone         = false    // prevents duplicate event listener registration
+let _selectedProfile  = null
+let _pinEntry         = ''
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 // `tmdb` is defined in player.js (loaded first) as a var — do not redefine here.
@@ -31,10 +34,18 @@ const mtype     = (i, rt) => rt !== 'mixed' ? rt : (i.media_type || 'movie')
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  setupNav()
-  setupSearch()
-  setupModal()
-  setupPlayer()    // from player.js
+  // ── Auth gate ──
+  if (!checkAuth()) { showLoginScreen(); return }
+
+  // ── One-time setup (adds event listeners — only run once) ──
+  if (!setupDone) {
+    setupDone = true
+    setupNav()
+    setupSearch()
+    setupModal()
+    setupPlayer()    // from player.js
+    await loadCWFromServer()   // pull server CW and merge before rendering
+  }
 
   const filtered = activeFilter === 'all'
     ? ROWS
@@ -62,6 +73,138 @@ async function init() {
     const items = results[i]?.results || []
     if (items.length) content.appendChild(buildRow(row.title, items, row.type))
   })
+}
+
+// ── AUTH ──────────────────────────────────────────────────────────────────────
+
+function checkAuth() {
+  const token = localStorage.getItem('jf_token')
+  if (!token) return false
+  try {
+    // Decode the JWT payload (base64url) — no crypto needed for expiry check
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+    if (payload.exp * 1000 < Date.now()) {
+      localStorage.removeItem('jf_token')
+      return false
+    }
+    serverToken = token   // keep the player.js global in sync
+    return true
+  } catch(_) {
+    localStorage.removeItem('jf_token')
+    return false
+  }
+}
+
+async function showLoginScreen() {
+  const screen = document.getElementById('loginScreen')
+  screen.classList.remove('hidden')
+
+  // Fetch profiles from server and build cards
+  try {
+    const res      = await fetch('/api/profiles')
+    const profiles = await res.json()
+    const cards    = document.getElementById('profileCards')
+    cards.innerHTML = ''
+    profiles.forEach(p => {
+      const card = document.createElement('div')
+      card.className = 'profile-card'
+      card.innerHTML = `
+        <div class="profile-avatar">${p.name[0].toUpperCase()}</div>
+        <div class="profile-name">${p.name}</div>
+      `
+      card.addEventListener('click', () => showPinScreen(p))
+      cards.appendChild(card)
+    })
+  } catch(_) {}
+
+  buildPinKeypad()
+  document.getElementById('pinBack').addEventListener('click', showProfilePicker)
+}
+
+function showPinScreen(profile) {
+  _selectedProfile = profile
+  _pinEntry        = ''
+  document.getElementById('profilePicker').classList.add('hidden')
+  document.getElementById('pinScreen').classList.remove('hidden')
+  document.getElementById('pinFor').textContent = `Enter PIN for ${profile.name}`
+  updatePinDots()
+  document.getElementById('pinError').classList.add('hidden')
+}
+
+function showProfilePicker() {
+  _selectedProfile = null
+  _pinEntry        = ''
+  document.getElementById('pinScreen').classList.add('hidden')
+  document.getElementById('profilePicker').classList.remove('hidden')
+}
+
+function buildPinKeypad() {
+  const keypad = document.getElementById('pinKeypad')
+  keypad.innerHTML = ''
+  const keys = ['1','2','3','4','5','6','7','8','9','clear','0','del']
+  keys.forEach(k => {
+    const btn = document.createElement('button')
+    if (k === 'clear') {
+      btn.className   = 'pin-key pin-key-special'
+      btn.textContent = 'Clear'
+      btn.addEventListener('click', () => {
+        _pinEntry = ''
+        updatePinDots()
+        document.getElementById('pinError').classList.add('hidden')
+      })
+    } else if (k === 'del') {
+      btn.className   = 'pin-key pin-key-special'
+      btn.textContent = '⌫'
+      btn.addEventListener('click', () => {
+        _pinEntry = _pinEntry.slice(0, -1)
+        updatePinDots()
+        document.getElementById('pinError').classList.add('hidden')
+      })
+    } else {
+      btn.className   = 'pin-key'
+      btn.textContent = k
+      btn.addEventListener('click', () => onPinKey(k))
+    }
+    keypad.appendChild(btn)
+  })
+}
+
+function updatePinDots() {
+  document.querySelectorAll('.pin-dot').forEach((dot, i) =>
+    dot.classList.toggle('filled', i < _pinEntry.length))
+}
+
+function onPinKey(digit) {
+  if (_pinEntry.length >= 4) return
+  _pinEntry += digit
+  updatePinDots()
+  if (_pinEntry.length === 4) submitPin()
+}
+
+async function submitPin() {
+  if (!_selectedProfile) return
+  try {
+    const res = await fetch('/api/auth', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ profileId: _selectedProfile.id, pin: _pinEntry }),
+    })
+    if (res.ok) {
+      const { token } = await res.json()
+      localStorage.setItem('jf_token', token)
+      serverToken = token   // player.js global
+      document.getElementById('loginScreen').classList.add('hidden')
+      init()
+    } else {
+      _pinEntry = ''
+      updatePinDots()
+      document.getElementById('pinError').classList.remove('hidden')
+    }
+  } catch(_) {
+    _pinEntry = ''
+    updatePinDots()
+    document.getElementById('pinError').classList.remove('hidden')
+  }
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
