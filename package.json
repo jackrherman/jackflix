@@ -1,0 +1,17 @@
+{
+  "name": "jackflix",
+  "version": "1.0.0",
+  "description": "Personal Netflix-style streaming app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "puppeteer": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
