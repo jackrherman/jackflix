@@ -158,8 +158,13 @@ const server = http.createServer((req, res) => {
         let html = body.toString('utf8')
         html = html.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*\/?>/gi, '')
         html = html.replace(/(<iframe[^>]+\bsrc=)(["'])([^"']+)(["'])/gi, (m, pre, q1, u, q2) => {
-          if (/^https?:\/\//.test(u)) return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(u) + q2
-          return m
+          if (u.indexOf('/api/embed-proxy') !== -1) return m
+          let abs = u
+          if (!/^https?:\/\//.test(u)) {
+            try { abs = new URL(u, rawUrl).href } catch (_) { return m }
+          }
+          if (!isSafe(abs)) return m
+          return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(abs) + q2
         })
         const base = '<base href="' + rawUrl.replace(/"/g, '%22') + '">'
         const injected = base + INJECTED_SCRIPT
