@@ -116,6 +116,8 @@ async function getBrowser() {
   console.log('[browser] launching…')
   browser = await puppeteer.launch({
     headless: true,
+    // Persist cookies/localStorage between requests — embed sites trust returning visitors
+    userDataDir: '/tmp/puppeteer-profile',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -172,7 +174,19 @@ async function extractStream(embedUrl) {
         return
       }
 
-      // Only block images and fonts — don't block media (might be needed by player)
+        // Block navigation away from embed/CDN domains (mirrors Electron's will-navigate guard)
+      if (rt === 'document') {
+        const SAFE = ['vidsrc','2embed','embed.su','rabbitstream','dokicloud',
+                      'gogocdn','vidcloud','jwpcdn','akamai','cloudfront','cloudflare']
+        const isSafe = url === embedUrl || url === 'about:blank' || SAFE.some(d => url.includes(d))
+        if (!isSafe) {
+          console.log(`[extract] blocked navigation: ${url.slice(0, 80)}`)
+          req.abort()
+          return
+        }
+      }
+
+      // Only block images and fonts
       if (['image', 'font'].includes(rt)) {
         req.abort()
         return
@@ -199,34 +213,30 @@ async function extractStream(embedUrl) {
     })
 
     console.log(`[extract] loading: ${embedUrl}`)
-    await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: SNIFF_TIMEOUT })
+
+    // Wait for full load (mirrors Electron's did-finish-load), then click
+    await page.goto(embedUrl, { waitUntil: 'load', timeout: SNIFF_TIMEOUT })
     console.log(`[extract] page loaded — title: "${await page.title().catch(() => '?')}"`)
 
-    // Give the player JS time to initialise before clicking
-    await new Promise(r => setTimeout(r, 2500))
-
-    // Try clicking play multiple times — some sites need it after ads/overlays settle
-    for (let attempt = 0; attempt < 3 && !streamUrl; attempt++) {
-      await page.evaluate(() => {
-        const selectors = [
-          '.jw-display-icon-container',
-          '.jw-icon-display',
-          '.vjs-big-play-button',
-          '[class*="play-btn"]',
-          '[class*="play-button"]',
-          '[class*="btn-play"]',
-          '[class*="playBtn"]',
-          '[class*="play_btn"]',
-          '.play',
-          'button',
-        ]
-        for (const s of selectors) {
-          const el = document.querySelector(s)
-          if (el) { el.click(); return }
-        }
-      }).catch(() => {})
-      if (!streamUrl) await new Promise(r => setTimeout(r, 1500))
-    }
+    // Click play once the full page is loaded (same as Electron's did-finish-load)
+    await page.evaluate(() => {
+      const selectors = [
+        '.jw-display-icon-container',
+        '.jw-icon-display',
+        '.vjs-big-play-button',
+        '[class*="play-btn"]',
+        '[class*="play-button"]',
+        '[class*="btn-play"]',
+        '[class*="playBtn"]',
+        '[class*="play_btn"]',
+        '.play',
+        'button',
+      ]
+      for (const s of selectors) {
+        const el = document.querySelector(s)
+        if (el) { el.click(); return }
+      }
+    }).catch(() => {})
 
     const deadline = Date.now() + SNIFF_TIMEOUT
     while (!streamUrl && Date.now() < deadline) {
