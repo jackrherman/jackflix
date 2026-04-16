@@ -1,10 +1,13 @@
 'use strict'
 
-const express   = require('express')
-const puppeteer = require('puppeteer')
-const path      = require('path')
-const crypto    = require('crypto')
-const jwt       = require('jsonwebtoken')
+const express        = require('express')
+const puppeteer      = require('puppeteer-extra')
+const StealthPlugin  = require('puppeteer-extra-plugin-stealth')
+const path           = require('path')
+const crypto         = require('crypto')
+const jwt            = require('jsonwebtoken')
+
+puppeteer.use(StealthPlugin())
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -174,18 +177,31 @@ async function extractStream(embedUrl) {
 
     await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: SNIFF_TIMEOUT })
 
-    await page.evaluate(() => {
-      const selectors = [
-        '.jw-display-icon-container',
-        '.vjs-big-play-button',
-        '[class*="play"]',
-        'button',
-      ]
-      for (const s of selectors) {
-        const el = document.querySelector(s)
-        if (el) { el.click(); return }
-      }
-    }).catch(() => {})
+    // Give the player JS time to initialise before clicking
+    await new Promise(r => setTimeout(r, 2500))
+
+    // Try clicking play multiple times — some sites need it after ads/overlays settle
+    for (let attempt = 0; attempt < 3 && !streamUrl; attempt++) {
+      await page.evaluate(() => {
+        const selectors = [
+          '.jw-display-icon-container',
+          '.jw-icon-display',
+          '.vjs-big-play-button',
+          '[class*="play-btn"]',
+          '[class*="play-button"]',
+          '[class*="btn-play"]',
+          '[class*="playBtn"]',
+          '[class*="play_btn"]',
+          '.play',
+          'button',
+        ]
+        for (const s of selectors) {
+          const el = document.querySelector(s)
+          if (el) { el.click(); return }
+        }
+      }).catch(() => {})
+      if (!streamUrl) await new Promise(r => setTimeout(r, 1500))
+    }
 
     const deadline = Date.now() + SNIFF_TIMEOUT
     while (!streamUrl && Date.now() < deadline) {
