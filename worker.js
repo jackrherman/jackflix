@@ -144,74 +144,24 @@ function corsHeaders(extra = {}) {
   }
 }
 
-// ── EMBED PROXY ───────────────────────────────────────────────────────────────
+// ── VPS BACKEND ───────────────────────────────────────────────────────────────
 
-async function handleEmbedProxy(searchParams) {
-  const rawUrl = searchParams.get('url')
-  if (!rawUrl) {
-    return new Response('{"error":"Missing url"}', {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-    })
-  }
-  if (!isSafeProxyUrl(rawUrl)) {
-    return new Response('{"error":"Blocked"}', {
-      status: 403,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-    })
-  }
+const VPS_BASE   = 'http://107.175.245.21:3000'
+const VPS_SECRET = 'jf-rn-2026-xK9mP'
 
+async function forwardToVPS(pathname, searchParams) {
+  const qs  = searchParams.toString()
+  const vpsUrl = `${VPS_BASE}${pathname}${qs ? '?' + qs : ''}`
   try {
-    const r = await fetch(rawUrl, {
-      headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer':         'https://www.google.com/',
-      },
+    const r = await fetch(vpsUrl, {
+      headers: { 'x-jf-secret': VPS_SECRET },
       redirect: 'follow',
     })
-
-    const ct = (r.headers.get('content-type') || '').toLowerCase()
-
-    // Non-HTML resources: pass through with CORS header
-    if (!ct.includes('html')) {
-      const buf = await r.arrayBuffer()
-      return new Response(buf, {
-        headers: {
-          'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
-          ...corsHeaders(),
-        },
-      })
-    }
-
-    let html = await r.text()
-
-    // Strip baked-in CSP meta tags
-    html = html.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*\/?>/gi, '')
-
-    // Rewrite existing <iframe src="…"> to go through our proxy
-    html = html.replace(/(<iframe[^>]+\bsrc=)(["'])([^"']+)(["'])/gi, (m, pre, q1, url, q2) => {
-      if (/^https?:\/\//.test(url)) {
-        return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(url) + q2
-      }
-      return m
-    })
-
-    // Inject <base> + interceptor script immediately after <head>
-    const base     = `<base href="${rawUrl.replace(/"/g, '%22')}">`
-    const injected = base + INJECTED_SCRIPT
-
-    if (/<head[^>]*>/i.test(html)) {
-      html = html.replace(/<head[^>]*>/i, m => m + injected)
-    } else {
-      html = injected + html
-    }
-
-    return new Response(html, {
+    const buf = await r.arrayBuffer()
+    return new Response(buf, {
+      status: r.status,
       headers: {
-        'Content-Type':            'text/html; charset=utf-8',
-        'Content-Security-Policy': "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:",
+        'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
         ...corsHeaders(),
       },
     })
@@ -220,44 +170,6 @@ async function handleEmbedProxy(searchParams) {
       status: 502,
       headers: { 'Content-Type': 'application/json', ...corsHeaders() },
     })
-  }
-}
-
-// ── REQUEST PROXY ─────────────────────────────────────────────────────────────
-
-async function handleReqProxy(searchParams) {
-  const rawUrl  = searchParams.get('url')
-  const referer = searchParams.get('ref') || ''
-  if (!rawUrl) return new Response('', { status: 400, headers: corsHeaders() })
-  if (!isSafeProxyUrl(rawUrl)) return new Response('', { status: 403, headers: corsHeaders() })
-
-  let targetOrigin
-  try { targetOrigin = new URL(rawUrl).origin } catch (_) {
-    return new Response('', { status: 400, headers: corsHeaders() })
-  }
-
-  try {
-    const r = await fetch(rawUrl, {
-      headers: {
-        'User-Agent':       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept':           '*/*',
-        'Accept-Language':  'en-US,en;q=0.5',
-        'Origin':           targetOrigin,
-        'Referer':          referer || targetOrigin + '/',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-      redirect: 'follow',
-    })
-
-    const buf = await r.arrayBuffer()
-    return new Response(buf, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
-      },
-    })
-  } catch (e) {
-    return new Response('', { status: 502, headers: corsHeaders() })
   }
 }
 
@@ -272,10 +184,10 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() })
     }
 
-    if (url.pathname === '/api/embed-proxy') return handleEmbedProxy(url.searchParams)
-    if (url.pathname === '/api/req-proxy')   return handleReqProxy(url.searchParams)
+    if (url.pathname === '/api/embed-proxy') return forwardToVPS('/api/embed-proxy', url.searchParams)
+    if (url.pathname === '/api/req-proxy')   return forwardToVPS('/api/req-proxy',   url.searchParams)
 
-    return new Response('JackFlix Proxy Worker — OK', {
+    return new Response('JackFlix Proxy Worker — OK (VPS backend)', {
       status: 200,
       headers: { 'Content-Type': 'text/plain' },
     })
