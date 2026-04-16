@@ -6,6 +6,34 @@ const url = require('url')
 const SECRET = 'jf-rn-2026-xK9mP'
 const PORT = 80
 
+// ── COOKIE JAR ────────────────────────────────────────────────────────────────
+// Stores cookies per-hostname so Turnstile verification persists across requests.
+// Flow: browser solves Turnstile → POST /rcp_verify through req-proxy → cloudnestra
+// sets cookie → we store it → next embed-proxy fetch to cloudnestra includes it.
+const cookieJar = new Map()
+
+function storeCookies(hostname, setCookieHeaders) {
+  if (!setCookieHeaders) return
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders]
+  const jar = cookieJar.get(hostname) || {}
+  for (const h of list) {
+    const [pair] = h.split(';')
+    const eq = pair.indexOf('=')
+    if (eq === -1) continue
+    const name = pair.slice(0, eq).trim()
+    const value = pair.slice(eq + 1).trim()
+    if (name) jar[name] = value
+  }
+  cookieJar.set(hostname, jar)
+}
+
+function getCookies(hostname) {
+  const jar = cookieJar.get(hostname)
+  if (!jar || !Object.keys(jar).length) return ''
+  return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ')
+}
+
+// ── INJECTED SCRIPT ───────────────────────────────────────────────────────────
 const INJECTED_SCRIPT = `<script>
 (function () {
   var _P = null
@@ -126,19 +154,34 @@ function isSafe(rawUrl) {
   } catch (_) { return false }
 }
 
-function fetchUrl(rawUrl, headers, cb) {
+// fetchUrl: supports GET/POST, per-hostname cookie jar, body forwarding
+function fetchUrl(rawUrl, headers, method, body, cb) {
+  if (typeof method === 'function') { cb = method; method = 'GET'; body = null }
+  if (typeof body === 'function') { cb = body; body = null }
   const parsed = new URL(rawUrl)
   const mod = parsed.protocol === 'https:' ? https : http
+
+  // Merge stored cookies for this hostname
+  const stored = getCookies(parsed.hostname)
+  const mergedHeaders = stored ? Object.assign({}, headers, { 'Cookie': stored }) : Object.assign({}, headers)
+
+  const bodyBuf = body ? (Buffer.isBuffer(body) ? body : Buffer.from(body)) : null
+  if (bodyBuf) mergedHeaders['Content-Length'] = bodyBuf.length
+
   const opts = {
     hostname: parsed.hostname,
     port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
     path: parsed.pathname + (parsed.search || ''),
-    method: 'GET',
-    headers,
+    method: method || 'GET',
+    headers: mergedHeaders,
     rejectUnauthorized: false,
   }
-  const req = mod.request(opts, cb)
+  const req = mod.request(opts, (upstream) => {
+    storeCookies(parsed.hostname, upstream.headers['set-cookie'])
+    cb(upstream, null)
+  })
   req.on('error', (e) => cb(null, e))
+  if (bodyBuf) req.write(bodyBuf)
   req.end()
 }
 
@@ -149,6 +192,10 @@ const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true)
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Headers', '*')
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204); res.end(); return
+  }
 
   if (parsed.pathname === '/api/embed-proxy') {
     const rawUrl = parsed.query.url
@@ -163,7 +210,7 @@ const server = http.createServer((req, res) => {
       'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
       'Accept-Language': 'en-US,en;q=0.5',
       'Referer': embedReferer,
-    }, (upstream, err) => {
+    }, 'GET', null, (upstream, err) => {
       if (err || !upstream) { res.writeHead(502); res.end('Upstream error: ' + (err && err.message)); return }
       let chunks = []
       upstream.on('data', c => chunks.push(c))
@@ -205,20 +252,31 @@ const server = http.createServer((req, res) => {
     if (!rawUrl || !isSafe(rawUrl)) { res.writeHead(400); res.end('Bad url'); return }
     let targetOrigin
     try { targetOrigin = new URL(rawUrl).origin } catch (_) { res.writeHead(400); res.end(); return }
-    fetchUrl(rawUrl, {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.5',
-      'Origin': targetOrigin,
-      'Referer': ref || targetOrigin + '/',
-      'X-Requested-With': 'XMLHttpRequest',
-    }, (upstream, err) => {
-      if (err || !upstream) { res.writeHead(502); res.end(''); return }
-      let chunks = []
-      upstream.on('data', c => chunks.push(c))
-      upstream.on('end', () => {
-        res.writeHead(upstream.statusCode, { 'Content-Type': upstream.headers['content-type'] || 'application/octet-stream' })
-        res.end(Buffer.concat(chunks))
+
+    // Read incoming request body (needed for POST, e.g. Turnstile /rcp_verify)
+    const bodyChunks = []
+    req.on('data', c => bodyChunks.push(c))
+    req.on('end', () => {
+      const reqBody = bodyChunks.length ? Buffer.concat(bodyChunks) : null
+      const reqMethod = req.method || 'GET'
+      const proxyHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Origin': targetOrigin,
+        'Referer': ref || targetOrigin + '/',
+        'X-Requested-With': 'XMLHttpRequest',
+      }
+      if (req.headers['content-type']) proxyHeaders['Content-Type'] = req.headers['content-type']
+
+      fetchUrl(rawUrl, proxyHeaders, reqMethod, reqBody, (upstream, err) => {
+        if (err || !upstream) { res.writeHead(502); res.end(''); return }
+        let chunks = []
+        upstream.on('data', c => chunks.push(c))
+        upstream.on('end', () => {
+          res.writeHead(upstream.statusCode, { 'Content-Type': upstream.headers['content-type'] || 'application/octet-stream' })
+          res.end(Buffer.concat(chunks))
+        })
       })
     })
   } else {
