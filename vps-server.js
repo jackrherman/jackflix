@@ -68,7 +68,12 @@ const INJECTED_SCRIPT = `<script>
   }
   function _shouldProxy(u) {
     if (!u) return false
-    try { return new URL(u).origin !== location.origin && u.indexOf('/api/req-proxy') === -1 } catch (e) { return false }
+    try {
+      var _h = new URL(u).hostname
+      // Never proxy Cloudflare challenge/beacon - Turnstile needs direct browser access
+      if (_h === 'challenges.cloudflare.com' || _h === 'static.cloudflareinsights.com') return false
+      return new URL(u).origin !== location.origin && u.indexOf('/api/req-proxy') === -1
+    } catch (e) { return false }
   }
   function _toReqProxy(u) {
     return '/api/req-proxy?url=' + encodeURIComponent(u) + '&ref=' + encodeURIComponent(_EMBED_BASE || location.href)
@@ -141,6 +146,14 @@ const INJECTED_SCRIPT = `<script>
   setTimeout(_autoClick, 800)
   setTimeout(_autoClick, 2000)
   setTimeout(_autoClick, 4000)
+
+  // Scan initial page HTML for m3u8 URLs that are already present
+  setTimeout(function() {
+    try { scanText(document.documentElement.innerHTML) } catch(e) {}
+  }, 1000)
+  setTimeout(function() {
+    try { scanText(document.documentElement.innerHTML) } catch(e) {}
+  }, 3000)
 })()
 </script>`
 
