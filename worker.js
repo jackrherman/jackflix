@@ -146,7 +146,7 @@ function corsHeaders(extra = {}) {
 
 // ── VPS BACKEND ───────────────────────────────────────────────────────────────
 
-const VPS_BASE   = 'http://107.175.245.21'
+const VPS_BASE   = 'http://107.175.245.21.nip.io'
 const VPS_SECRET = 'jf-rn-2026-xK9mP'
 
 async function forwardToVPS(pathname, searchParams) {
