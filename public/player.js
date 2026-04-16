@@ -224,7 +224,7 @@ function tryServer(serverIndex) {
   const iframe = document.createElement('iframe')
   iframe.id    = 'jf-stream-iframe'
   iframe.src   = proxyUrl
-  iframe.style.cssText = 'position:fixed;width:1px;height:1px;top:-9999px;left:-9999px;opacity:0;pointer-events:none;'
+  iframe.style.cssText = 'position:fixed;width:800px;height:450px;top:-9999px;left:-9999px;opacity:0;pointer-events:none;'
   document.body.appendChild(iframe)
 
   const timer = setTimeout(() => {

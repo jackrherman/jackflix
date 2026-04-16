@@ -8,23 +8,44 @@ const PORT = 80
 
 // ── COOKIE JAR ────────────────────────────────────────────────────────────────
 // Stores cookies per-hostname so Turnstile verification persists across requests.
-// Flow: browser solves Turnstile → POST /rcp_verify through req-proxy → cloudnestra
-// sets cookie → we store it → next embed-proxy fetch to cloudnestra includes it.
-const cookieJar = new Map()
+// Persisted to disk so VPS restarts don't force re-solving Turnstile.
+const fs = require('fs')
+const COOKIE_FILE = '/opt/jackflix-proxy/cookies.json'
+
+let cookieJar = new Map()
+
+function loadCookies() {
+  try {
+    const raw = fs.readFileSync(COOKIE_FILE, 'utf8')
+    const obj = JSON.parse(raw)
+    cookieJar = new Map(Object.entries(obj))
+  } catch (_) {}
+}
+
+function saveCookies() {
+  try {
+    const obj = {}
+    cookieJar.forEach((v, k) => { obj[k] = v })
+    fs.writeFileSync(COOKIE_FILE, JSON.stringify(obj))
+  } catch (_) {}
+}
+
+loadCookies()
 
 function storeCookies(hostname, setCookieHeaders) {
   if (!setCookieHeaders) return
   const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders]
   const jar = cookieJar.get(hostname) || {}
+  let changed = false
   for (const h of list) {
     const [pair] = h.split(';')
     const eq = pair.indexOf('=')
     if (eq === -1) continue
     const name = pair.slice(0, eq).trim()
     const value = pair.slice(eq + 1).trim()
-    if (name) jar[name] = value
+    if (name) { jar[name] = value; changed = true }
   }
-  cookieJar.set(hostname, jar)
+  if (changed) { cookieJar.set(hostname, jar); saveCookies() }
 }
 
 function getCookies(hostname) {
