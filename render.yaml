@@ -2,7 +2,7 @@ services:
   - type: web
     name: jackflix
     runtime: node
-    buildCommand: npm install && npx puppeteer browsers install chrome
+    buildCommand: npm install
     startCommand: node server.js
     plan: free
     healthCheckPath: /

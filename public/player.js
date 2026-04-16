@@ -14,12 +14,13 @@ var serverToken = localStorage.getItem('jf_token') || null
 
 // ── PLAYER STATE ──────────────────────────────────────────────────────────────
 
-let currentPlayer        = null
-let hlsInstance          = null
-let hideTimer            = null
-let isScrubbing          = false
-let playerReady          = false   // guard: setupPlayer() runs only once
-let streamAbortController = null   // cancels in-flight /api/stream fetch on close
+let currentPlayer         = null
+let hlsInstance           = null
+let hideTimer             = null
+let isScrubbing           = false
+let playerReady           = false   // guard: setupPlayer() runs only once
+let extractionId          = 0       // incremented on each tryServer(); invalidates stale handlers
+let currentExtractCleanup = null    // called by cleanupStreamIframe() to cancel pending extraction
 
 const vid = () => document.getElementById('vpVideo')
 
@@ -128,6 +129,28 @@ async function loadCWFromServer() {
   } catch(_) {}
 }
 
+// ── EMBED SERVERS ─────────────────────────────────────────────────────────────
+
+const _embedServers = {
+  movie: [
+    id       => `https://vidsrc.to/embed/movie/${id}`,
+    id       => `https://www.2embed.cc/embed/${id}`,
+    id       => `https://embed.su/embed/movie/${id}`,
+  ],
+  tv: [
+    (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
+    (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}`,
+    (id,s,e) => `https://embed.su/embed/tv/${id}/${s}/${e}`,
+  ],
+}
+
+function buildEmbedUrl(tmdbId, type, season, episode, serverIndex) {
+  const si = Math.min(serverIndex || 0, 2)
+  return type === 'movie'
+    ? _embedServers.movie[si](tmdbId)
+    : _embedServers.tv[si](tmdbId, season, episode)
+}
+
 // ── OPEN PLAYER ───────────────────────────────────────────────────────────────
 
 function openPlayer(title, tmdbId, type, season = 1, episode = 1, posterPath = null, resumeFrom = null) {
@@ -160,43 +183,72 @@ function openPlayer(title, tmdbId, type, season = 1, episode = 1, posterPath = n
   document.addEventListener('keydown', onPlayerKey)
 }
 
-// ── STREAM FETCH ──────────────────────────────────────────────────────────────
-// Replaces the Electron webRequest sniffing: calls the server's /api/stream
-// endpoint which runs Puppeteer server-side and returns the m3u8 URL.
+// ── STREAM EXTRACTION ─────────────────────────────────────────────────────────
+// The server proxies the embed page HTML (stripping X-Frame-Options/CSP) and
+// injects a script that intercepts XHR/fetch for m3u8 URLs.  We load that
+// proxied page in a hidden iframe; when the injected script captures an m3u8
+// URL it postMessages it here and we pass it to HLS.js.
+//
+// Child iframes created by the embed are also routed through the proxy, so
+// multi-iframe player chains (e.g. vidsrc → rabbitstream) are handled too.
 
-async function tryServer(serverIndex) {
+function cleanupStreamIframe() {
+  if (currentExtractCleanup) { currentExtractCleanup(); currentExtractCleanup = null }
+  const el = document.getElementById('jf-stream-iframe')
+  if (el) el.remove()
+}
+
+function tryServer(serverIndex) {
   if (!currentPlayer) return
   currentPlayer.serverIndex = serverIndex
 
-  // Cancel any previous in-flight request
-  if (streamAbortController) streamAbortController.abort()
-  streamAbortController = new AbortController()
+  cleanupStreamIframe()
+  extractionId++
+  const myId = extractionId
 
-  try {
-    const res = await fetch('/api/stream', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        tmdbId:      currentPlayer.tmdbId,
-        type:        currentPlayer.type,
-        season:      currentPlayer.season,
-        episode:     currentPlayer.episode,
-        serverIndex,
-      }),
-      signal: streamAbortController.signal,
-    })
+  const embedUrl = buildEmbedUrl(
+    currentPlayer.tmdbId,
+    currentPlayer.type,
+    currentPlayer.season,
+    currentPlayer.episode,
+    serverIndex,
+  )
+  const proxyUrl = '/api/embed-proxy?url=' + encodeURIComponent(embedUrl)
 
-    if (!currentPlayer) return  // closed while waiting
+  const iframe = document.createElement('iframe')
+  iframe.id    = 'jf-stream-iframe'
+  iframe.src   = proxyUrl
+  iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups')
+  iframe.style.cssText = 'position:fixed;width:1px;height:1px;top:-9999px;left:-9999px;opacity:0;pointer-events:none;'
+  document.body.appendChild(iframe)
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const { streamUrl, referer } = await res.json()
-    if (!streamUrl) throw new Error('Empty stream URL')
-
-    currentPlayer.referer = referer
-    startHLS(streamUrl)
-  } catch(e) {
-    if (e.name === 'AbortError') return  // intentional close — do nothing
+  const timer = setTimeout(() => {
+    if (extractionId !== myId) return
+    cleanupStreamIframe()
+    window.removeEventListener('message', msgHandler)
     onTimeout()
+  }, 20_000)
+
+  function msgHandler(e) {
+    if (extractionId !== myId) return
+    if (!e.data || e.data.type !== 'jf-stream') return
+    const url = e.data.url
+    if (!url || !url.includes('.m3u8')) return
+
+    clearTimeout(timer)
+    cleanupStreamIframe()
+    window.removeEventListener('message', msgHandler)
+
+    if (!currentPlayer) return
+    currentPlayer.referer = e.data.ref || null
+    startHLS(url)
+  }
+
+  window.addEventListener('message', msgHandler)
+
+  currentExtractCleanup = () => {
+    clearTimeout(timer)
+    window.removeEventListener('message', msgHandler)
   }
 }
 
@@ -321,11 +373,7 @@ function closePlayer() {
 }
 
 function closePlayerSilent() {
-  // Cancel any pending stream fetch
-  if (streamAbortController) {
-    streamAbortController.abort()
-    streamAbortController = null
-  }
+  cleanupStreamIframe()
 
   if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null }
 

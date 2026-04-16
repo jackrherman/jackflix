@@ -5,15 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "dev": "node --watch server.js"
   },
   "dependencies": {
     "express": "^4.19.0",
-    "jsonwebtoken": "^9.0.0",
-    "puppeteer": "^22.0.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "jsonwebtoken": "^9.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,13 +1,9 @@
 'use strict'
 
-const express        = require('express')
-const puppeteer      = require('puppeteer-extra')
-const StealthPlugin  = require('puppeteer-extra-plugin-stealth')
-const path           = require('path')
-const crypto         = require('crypto')
-const jwt            = require('jsonwebtoken')
-
-puppeteer.use(StealthPlugin())
+const express = require('express')
+const path    = require('path')
+const crypto  = require('crypto')
+const jwt     = require('jsonwebtoken')
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -16,44 +12,13 @@ const PORT = process.env.PORT || 3000
 
 const TMDB_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4MjVlMzYzYTM3MDRhZDk5MTZlOTE4NzI3OWJjNjRkYyIsIm5iZiI6MTc3NjI4OTMwMC44MzgsInN1YiI6IjY5ZTAwNjE0OWMzOWYzNTRmODAxMmM0MCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.NSmPuuHTY8KGU4GTN4hz8_PVe9bxnXxmlfi5Ce5Co8A'
 
-const SNIFF_TIMEOUT = 20_000  // ms to wait for the m3u8 URL per server attempt
-
-const MOVIE_SERVERS = [
-  id       => `https://vidsrc.to/embed/movie/${id}`,
-  id       => `https://www.2embed.cc/embed/${id}`,
-  id       => `https://embed.su/embed/movie/${id}`,
-]
-const TV_SERVERS = [
-  (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
-  (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}`,
-  (id,s,e) => `https://embed.su/embed/tv/${id}/${s}/${e}`,
-]
-
-function buildEmbedUrl({ tmdbId, type, season, episode, serverIndex = 0 }) {
-  const si = Math.min(serverIndex, 2)
-  return type === 'movie'
-    ? MOVIE_SERVERS[si](tmdbId)
-    : TV_SERVERS[si](tmdbId, season, episode)
-}
-
-function isStreamUrl(url) {
-  return url.includes('.m3u8') &&
-    !url.includes('subtitle') &&
-    !url.includes('caption') &&
-    !url.includes('.vtt')
-}
-
 // ── AUTH CONFIG ───────────────────────────────────────────────────────────────
-// JWT_SECRET and JACK_PIN_HASH are set as Render environment variables.
-// JACK_PIN_HASH = PBKDF2-SHA256(pin, 'jackflix', 100000, 32) as hex.
-// The PIN itself never leaves the server.
 
 const JWT_SECRET   = process.env.JWT_SECRET  || 'dev-secret-change-me'
 const PBKDF2_SALT  = 'jackflix'
 const PBKDF2_ITERS = 100_000
 const PBKDF2_LEN   = 32
 
-// Profiles keyed by id. Add more by setting MORE_PROFILE env vars as needed.
 const PROFILES = {
   jack: {
     id:      'jack',
@@ -63,13 +28,10 @@ const PROFILES = {
 }
 
 // ── CONTINUE WATCHING (in-memory) ─────────────────────────────────────────────
-// Keyed by profileId. Survives page reloads (clients re-sync on connect).
-// Cleared on server restart — clients push their local store on next cwSave().
 
 const cwStore = {}
 
 // ── RATE LIMITING ─────────────────────────────────────────────────────────────
-// Max 5 auth attempts per IP per minute.
 
 const authAttempts = {}
 
@@ -104,156 +66,183 @@ function requireAuth(req, res, next) {
   }
 }
 
-// ── PERSISTENT BROWSER ────────────────────────────────────────────────────────
-// One browser instance is shared across all requests.
-// Render free tier has 512MB RAM — Puppeteer uses ~150–250MB with these flags.
+// ── EMBED PROXY ───────────────────────────────────────────────────────────────
+// Fetches embed pages server-side (stripping X-Frame-Options/CSP) and serves
+// them from our own origin so the user's browser — at a residential IP — loads
+// the player.  An injected script intercepts XHR/fetch for m3u8 URLs and
+// postMessages them to the parent frame (player.js).
+//
+// Child iframes created by the embed page have their src rewritten to also go
+// through this endpoint, so the interception is recursive.
 
-let browser = null
+const ALLOWED_PROXY_DOMAINS = [
+  'vidsrc.to', 'vidsrc.xyz', 'vidsrc.me', 'vidsrc.in',
+  '2embed.cc', '2embed.org',
+  'embed.su',
+  'rabbitstream.net', 'rabbitstream.xyz',
+  'dokicloud.one', 'dokicloud.net',
+  'gogocdn.net', 'gogocdn.club',
+  'vidcloud.one', 'vidcloud.fun',
+  'megacloud.tv', 'megacloud.xyz',
+  'filemoon.sx', 'filemoon.to',
+  'streamtape.com', 'streamtape.net',
+  'dood.watch', 'doodstream.com',
+]
 
-async function getBrowser() {
-  if (browser && browser.isConnected()) return browser
-
-  console.log('[browser] launching…')
-  browser = await puppeteer.launch({
-    headless: true,
-    // Persist cookies/localStorage between requests — embed sites trust returning visitors
-    userDataDir: '/tmp/puppeteer-profile',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',   // use /tmp instead of /dev/shm — critical for low-RAM
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-sync',
-      '--mute-audio',
-      '--disable-default-apps',
-    ],
-  })
-
-  browser.on('disconnected', () => {
-    browser = null
-    console.log('[browser] disconnected — will relaunch on next request')
-  })
-
-  console.log('[browser] ready')
-  return browser
+function isAllowedProxyUrl(rawUrl) {
+  try {
+    const { hostname } = new URL(rawUrl)
+    return ALLOWED_PROXY_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))
+  } catch(_) {
+    return false
+  }
 }
 
-// ── STREAM EXTRACTION ─────────────────────────────────────────────────────────
+// Script injected into every proxied HTML page.
+// • Saves a reference to the real parent window before overriding frame-detection props.
+// • Overrides window.top/parent/self so the embed thinks it is not inside an iframe.
+// • Intercepts XHR and fetch; any .m3u8 URL is postMessaged up to the real parent.
+// • Relays jf-stream messages from child frames upward so multi-iframe chains work.
+// • Rewrites iframe src/data-src assignments to route child frames through our proxy.
+const INJECTED_SCRIPT = `<script>
+(function () {
+  // Save real parent reference BEFORE overriding window.parent
+  var _P = null
+  try { if (window.parent !== window) _P = window.parent } catch (e) {}
 
-async function extractStream(embedUrl) {
-  const b    = await getBrowser()
-  const page = await b.newPage()
-
-  let streamUrl = null
-  let referer   = null
-
+  // Override frame-detection properties so embed scripts don't bust the frame
   try {
-    page.on('popup', async popup => {
-      try { await popup.close() } catch(_) {}
-    })
+    var _dP = Object.defineProperty, _w = window
+    _dP(_w, 'top',    { get: function () { return _w }, configurable: true })
+    _dP(_w, 'parent', { get: function () { return _w }, configurable: true })
+    _dP(_w, 'self',   { get: function () { return _w }, configurable: true })
+  } catch (e) {}
 
-    // Forward page console logs so we can see what the embed page is doing
-    page.on('console', msg => console.log(`[page] ${msg.type()}: ${msg.text()}`))
-    page.on('pageerror', err => console.log(`[page] error: ${err.message}`))
-
-    await page.setRequestInterception(true)
-
-    page.on('request', req => {
-      const url = req.url()
-      const rt  = req.resourceType()
-
-      if (isStreamUrl(url)) {
-        console.log(`[stream] intercepted: ${url.slice(0, 120)}`)
-        streamUrl = url
-        referer   = req.headers()['referer'] || null
-        req.continue()
-        return
-      }
-
-        // Block navigation away from embed/CDN domains (mirrors Electron's will-navigate guard)
-      if (rt === 'document') {
-        const SAFE = ['vidsrc','2embed','embed.su','rabbitstream','dokicloud',
-                      'gogocdn','vidcloud','jwpcdn','akamai','cloudfront','cloudflare']
-        const isSafe = url === embedUrl || url === 'about:blank' || SAFE.some(d => url.includes(d))
-        if (!isSafe) {
-          console.log(`[extract] blocked navigation: ${url.slice(0, 80)}`)
-          req.abort()
-          return
-        }
-      }
-
-      // Only block images and fonts
-      if (['image', 'font'].includes(rt)) {
-        req.abort()
-        return
-      }
-
-      req.continue()
-    })
-
-    // Also scan JSON/JS responses for embedded m3u8 URLs
-    page.on('response', async response => {
-      if (streamUrl) return
-      try {
-        const ct = response.headers()['content-type'] || ''
-        if (ct.includes('json') || ct.includes('javascript')) {
-          const text = await response.text().catch(() => '')
-          const match = text.match(/https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/i)
-          if (match) {
-            console.log(`[stream] found in response body: ${match[0].slice(0, 120)}`)
-            streamUrl = match[0]
-            referer   = response.url()
-          }
-        }
-      } catch(_) {}
-    })
-
-    console.log(`[extract] loading: ${embedUrl}`)
-
-    // Wait for full load (mirrors Electron's did-finish-load), then click
-    await page.goto(embedUrl, { waitUntil: 'load', timeout: SNIFF_TIMEOUT })
-    console.log(`[extract] page loaded — title: "${await page.title().catch(() => '?')}"`)
-
-    // Click play once the full page is loaded (same as Electron's did-finish-load)
-    await page.evaluate(() => {
-      const selectors = [
-        '.jw-display-icon-container',
-        '.jw-icon-display',
-        '.vjs-big-play-button',
-        '[class*="play-btn"]',
-        '[class*="play-button"]',
-        '[class*="btn-play"]',
-        '[class*="playBtn"]',
-        '[class*="play_btn"]',
-        '.play',
-        'button',
-      ]
-      for (const s of selectors) {
-        const el = document.querySelector(s)
-        if (el) { el.click(); return }
-      }
-    }).catch(() => {})
-
-    const deadline = Date.now() + SNIFF_TIMEOUT
-    while (!streamUrl && Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 250))
-    }
-    console.log(`[extract] done — streamUrl: ${streamUrl ? 'FOUND' : 'NOT FOUND'}`)
-
-  } finally {
-    await page.close().catch(() => {})
+  function report(url) {
+    if (!url || url.indexOf('.m3u8') === -1) return
+    if (url.indexOf('subtitle') !== -1 || url.indexOf('caption') !== -1 || url.indexOf('.vtt') !== -1) return
+    var msg = { type: 'jf-stream', url: url, ref: location.href }
+    if (_P) try { _P.postMessage(msg, '*') } catch (e) {}
   }
 
-  return { streamUrl, referer }
-}
+  // Relay jf-stream messages from deeper child frames up to our real parent
+  window.addEventListener('message', function (e) {
+    if (_P && e.data && e.data.type === 'jf-stream') try { _P.postMessage(e.data, '*') } catch (e2) {}
+  })
+
+  // Intercept XHR
+  var _xo = XMLHttpRequest.prototype.open
+  XMLHttpRequest.prototype.open = function (m, u) {
+    report(String(u || ''))
+    return _xo.apply(this, arguments)
+  }
+
+  // Intercept fetch
+  var _f = window.fetch
+  window.fetch = function (input) {
+    report(typeof input === 'string' ? input : ((input && input.url) || ''))
+    return _f.apply(window, arguments)
+  }
+
+  // Route child iframe src through our proxy so recursive frames are also intercepted
+  function _proxyIframe(v) {
+    if (v && /^https?:\\/\\//.test(v)) return '/api/embed-proxy?url=' + encodeURIComponent(v)
+    return v
+  }
+  try {
+    var _sd = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src')
+    if (_sd && _sd.set) Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+      get: _sd.get,
+      set: function (v) { return _sd.set.call(this, _proxyIframe(v)) },
+      configurable: true
+    })
+  } catch (e) {}
+  var _sa = Element.prototype.setAttribute
+  Element.prototype.setAttribute = function (n, v) {
+    if (this.tagName === 'IFRAME' && (n === 'src' || n === 'data-src')) v = _proxyIframe(v)
+    return _sa.call(this, n, v)
+  }
+
+  // DOM observer: catch m3u8 URLs set directly on <video> / <source> elements
+  try {
+    new MutationObserver(function () {
+      document.querySelectorAll('video[src], source[src]').forEach(function (el) {
+        report(el.getAttribute('src') || '')
+      })
+    }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] })
+  } catch (e) {}
+})()
+</script>`
+
+app.get('/api/embed-proxy', async (req, res) => {
+  const rawUrl = req.query.url
+  if (!rawUrl) return res.status(400).json({ error: 'Missing url parameter' })
+  if (!isAllowedProxyUrl(rawUrl)) {
+    console.log(`[proxy] blocked: ${rawUrl.slice(0, 80)}`)
+    return res.status(403).json({ error: 'Domain not in allowlist' })
+  }
+
+  try {
+    const r = await fetch(rawUrl, {
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer':         'https://www.google.com/',
+      },
+      redirect: 'follow',
+    })
+
+    const ct = (r.headers.get('content-type') || '').toLowerCase()
+
+    // Non-HTML resources (JS, CSS, images): pass through with CORS header added
+    if (!ct.includes('html')) {
+      res.setHeader('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      const buf = await r.arrayBuffer()
+      return res.send(Buffer.from(buf))
+    }
+
+    let html = await r.text()
+
+    // Strip any CSP meta tags baked into the HTML
+    html = html.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*\/?>/gi, '')
+
+    // Rewrite existing <iframe src="…"> attributes to go through our proxy
+    html = html.replace(/(<iframe[^>]+\bsrc=)(["'])([^"']+)(["'])/gi, (m, pre, q1, url, q2) => {
+      if (/^https?:\/\//.test(url)) {
+        return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(url) + q2
+      }
+      return m
+    })
+
+    // Inject <base> + interceptor script immediately after <head>
+    const base     = `<base href="${rawUrl.replace(/"/g, '%22')}">`
+    const injected = base + INJECTED_SCRIPT
+
+    if (/<head[^>]*>/i.test(html)) {
+      html = html.replace(/<head[^>]*>/i, m => m + injected)
+    } else {
+      html = injected + html
+    }
+
+    // Serve with permissive headers — no frame-busting, no CSP restrictions
+    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+    res.setHeader('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:")
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    // Explicitly do NOT set X-Frame-Options (omitting it allows framing)
+
+    console.log(`[proxy] served: ${rawUrl.slice(0, 80)}`)
+    res.send(html)
+
+  } catch (e) {
+    console.error('[proxy] error:', e.message)
+    res.status(502).json({ error: e.message })
+  }
+})
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 
-// CORS — allow browser and Electron app (file:// origin → null or undefined)
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin',  '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS')
@@ -266,7 +255,6 @@ app.use(express.json())
 app.use(express.static(path.join(__dirname, 'public')))
 
 // ── API: PROFILES ─────────────────────────────────────────────────────────────
-// Returns profile list — no PINs or hashes, safe to expose.
 
 app.get('/api/profiles', (req, res) => {
   const list = Object.values(PROFILES).map(p => ({ id: p.id, name: p.name }))
@@ -274,7 +262,6 @@ app.get('/api/profiles', (req, res) => {
 })
 
 // ── API: AUTH ─────────────────────────────────────────────────────────────────
-// Rate-limited. PIN is hashed server-side; never returned to client.
 
 app.post('/api/auth', async (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
@@ -306,8 +293,6 @@ app.post('/api/auth', async (req, res) => {
 })
 
 // ── API: CONTINUE WATCHING ────────────────────────────────────────────────────
-// GET  — returns server CW for the authenticated profile
-// PUT  — merges client CW with server CW (newer timestamp wins), returns merged
 
 app.get('/api/cw', requireAuth, (req, res) => {
   res.json(cwStore[req.profile.profileId] || {})
@@ -318,7 +303,6 @@ app.put('/api/cw', requireAuth, (req, res) => {
   const clientCW  = req.body || {}
   const serverCW  = cwStore[profileId] || {}
 
-  // Merge: prefer the entry with the newer timestamp
   const merged = { ...serverCW }
   for (const [key, entry] of Object.entries(clientCW)) {
     if (!merged[key] || (entry.ts || 0) > (merged[key].ts || 0)) {
@@ -326,7 +310,6 @@ app.put('/api/cw', requireAuth, (req, res) => {
     }
   }
 
-  // Trim to 50 entries, dropping oldest
   const entries = Object.entries(merged).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))
   cwStore[profileId] = Object.fromEntries(entries.slice(0, 50))
 
@@ -334,7 +317,6 @@ app.put('/api/cw', requireAuth, (req, res) => {
 })
 
 // ── API: TMDB PROXY ───────────────────────────────────────────────────────────
-// Keeps the TMDB token server-side instead of in the browser.
 
 app.get('/api/tmdb/*', async (req, res) => {
   try {
@@ -353,35 +335,8 @@ app.get('/api/tmdb/*', async (req, res) => {
   }
 })
 
-// ── API: STREAM EXTRACTION ────────────────────────────────────────────────────
-// Puppeteer loads the embed URL, intercepts the m3u8 request, returns the URL.
-
-app.post('/api/stream', async (req, res) => {
-  const { tmdbId, type, season, episode, serverIndex = 0 } = req.body
-  if (!tmdbId || !type) return res.status(400).json({ error: 'Missing tmdbId/type' })
-
-  const embedUrl = buildEmbedUrl({ tmdbId, type, season, episode, serverIndex })
-  console.log(`[stream] ${type} ${tmdbId}${type === 'tv' ? ` S${season}E${episode}` : ''} server=${serverIndex}`)
-
-  try {
-    const { streamUrl, referer } = await extractStream(embedUrl)
-
-    if (!streamUrl) {
-      console.log('[stream] not found within timeout')
-      return res.status(404).json({ error: 'No stream found' })
-    }
-
-    console.log(`[stream] found: …${streamUrl.slice(-60)}`)
-    res.json({ streamUrl, referer })
-  } catch(e) {
-    console.error('[stream] error:', e.message)
-    res.status(500).json({ error: e.message })
-  }
-})
-
 // ── START ─────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
   console.log(`JackFlix running on port ${PORT}`)
-  getBrowser().catch(e => console.error('[browser] warm-up failed:', e.message))
 })
