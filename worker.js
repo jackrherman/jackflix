@@ -186,6 +186,7 @@ export default {
 
     if (url.pathname === '/api/embed-proxy') return forwardToVPS('/api/embed-proxy', url.searchParams)
     if (url.pathname === '/api/req-proxy')   return forwardToVPS('/api/req-proxy',   url.searchParams)
+    if (url.pathname === '/api/resolve')     return forwardToVPS('/api/resolve',     url.searchParams)
 
     return new Response('JackFlix Proxy Worker — OK (VPS backend)', {
       status: 200,

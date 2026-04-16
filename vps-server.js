@@ -313,6 +313,35 @@ const server = http.createServer((req, res) => {
         })
       })
     })
+  } else if (parsed.pathname === '/api/resolve') {
+    // Resolve a TMDB ID to a flixcdn video_url via moviesapi.to
+    const tmdbId  = parsed.query.tmdbId
+    const type    = parsed.query.type || 'movie'
+    const season  = parsed.query.season  || '1'
+    const episode = parsed.query.episode || '1'
+    if (!tmdbId) { res.writeHead(400); res.end('Missing tmdbId'); return }
+
+    const apiUrl = type === 'tv'
+      ? `https://ww2.moviesapi.to/api/tv/${tmdbId}/${season}/${episode}`
+      : `https://ww2.moviesapi.to/api/movie/${tmdbId}`
+
+    fetchUrl(apiUrl, {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json, */*',
+      'Referer': 'https://ww2.moviesapi.to/',
+      'Origin': 'https://ww2.moviesapi.to',
+    }, (upstream, err) => {
+      if (err || !upstream) { res.writeHead(502); res.end(JSON.stringify({ error: 'upstream' })); return }
+      let chunks = []
+      upstream.on('data', c => chunks.push(c))
+      upstream.on('end', () => {
+        res.writeHead(upstream.statusCode, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        })
+        res.end(Buffer.concat(chunks))
+      })
+    })
   } else {
     res.writeHead(200); res.end('JackFlix VPS proxy OK')
   }
