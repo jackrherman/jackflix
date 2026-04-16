@@ -99,6 +99,17 @@ const INJECTED_SCRIPT = `<script>
       })
     }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] })
   } catch (e) {}
+
+  // Auto-click play buttons so embed players start loading the stream
+  function _autoClick() {
+    var sels = ['#pl_but', '.play-btn', '.play_btn', '.play-button', '[class*="play-ic"]', '[id="play"]', '.jw-display-icon-container', '.vjs-big-play-button']
+    sels.forEach(function(s) {
+      try { var el = document.querySelector(s); if (el) el.click() } catch(e) {}
+    })
+  }
+  setTimeout(_autoClick, 800)
+  setTimeout(_autoClick, 2000)
+  setTimeout(_autoClick, 4000)
 })()
 </script>`
 
