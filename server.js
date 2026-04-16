@@ -154,6 +154,10 @@ async function extractStream(embedUrl) {
       try { await popup.close() } catch(_) {}
     })
 
+    // Forward page console logs so we can see what the embed page is doing
+    page.on('console', msg => console.log(`[page] ${msg.type()}: ${msg.text()}`))
+    page.on('pageerror', err => console.log(`[page] error: ${err.message}`))
+
     await page.setRequestInterception(true)
 
     page.on('request', req => {
@@ -161,13 +165,15 @@ async function extractStream(embedUrl) {
       const rt  = req.resourceType()
 
       if (isStreamUrl(url)) {
+        console.log(`[stream] intercepted: ${url.slice(0, 120)}`)
         streamUrl = url
         referer   = req.headers()['referer'] || null
         req.continue()
         return
       }
 
-      if (['image', 'font', 'media'].includes(rt)) {
+      // Only block images and fonts — don't block media (might be needed by player)
+      if (['image', 'font'].includes(rt)) {
         req.abort()
         return
       }
@@ -175,7 +181,26 @@ async function extractStream(embedUrl) {
       req.continue()
     })
 
+    // Also scan JSON/JS responses for embedded m3u8 URLs
+    page.on('response', async response => {
+      if (streamUrl) return
+      try {
+        const ct = response.headers()['content-type'] || ''
+        if (ct.includes('json') || ct.includes('javascript')) {
+          const text = await response.text().catch(() => '')
+          const match = text.match(/https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/i)
+          if (match) {
+            console.log(`[stream] found in response body: ${match[0].slice(0, 120)}`)
+            streamUrl = match[0]
+            referer   = response.url()
+          }
+        }
+      } catch(_) {}
+    })
+
+    console.log(`[extract] loading: ${embedUrl}`)
     await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: SNIFF_TIMEOUT })
+    console.log(`[extract] page loaded — title: "${await page.title().catch(() => '?')}"`)
 
     // Give the player JS time to initialise before clicking
     await new Promise(r => setTimeout(r, 2500))
@@ -207,6 +232,7 @@ async function extractStream(embedUrl) {
     while (!streamUrl && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 250))
     }
+    console.log(`[extract] done — streamUrl: ${streamUrl ? 'FOUND' : 'NOT FOUND'}`)
 
   } finally {
     await page.close().catch(() => {})
