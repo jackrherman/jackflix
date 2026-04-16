@@ -75,24 +75,17 @@ function requireAuth(req, res, next) {
 // Child iframes created by the embed page have their src rewritten to also go
 // through this endpoint, so the interception is recursive.
 
-const ALLOWED_PROXY_DOMAINS = [
-  'vidsrc.to', 'vidsrc.xyz', 'vidsrc.me', 'vidsrc.in',
-  '2embed.cc', '2embed.org',
-  'embed.su',
-  'rabbitstream.net', 'rabbitstream.xyz',
-  'dokicloud.one', 'dokicloud.net',
-  'gogocdn.net', 'gogocdn.club',
-  'vidcloud.one', 'vidcloud.fun',
-  'megacloud.tv', 'megacloud.xyz',
-  'filemoon.sx', 'filemoon.to',
-  'streamtape.com', 'streamtape.net',
-  'dood.watch', 'doodstream.com',
-]
-
-function isAllowedProxyUrl(rawUrl) {
+// SSRF protection: block requests to localhost and private IP ranges.
+// No domain allowlist — embed sites chain through unpredictable intermediate domains
+// (e.g. vidsrc.to → vsembed.ru) that we can't enumerate in advance.
+function isSafeProxyUrl(rawUrl) {
   try {
-    const { hostname } = new URL(rawUrl)
-    return ALLOWED_PROXY_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))
+    const h = new URL(rawUrl).hostname
+    if (!h) return false
+    if (h === 'localhost') return false
+    if (/^127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./.test(h)) return false
+    if (h.endsWith('.local') || h.endsWith('.internal')) return false
+    return rawUrl.startsWith('https://') || rawUrl.startsWith('http://')
   } catch(_) {
     return false
   }
@@ -229,9 +222,9 @@ const INJECTED_SCRIPT = `<script>
 app.get('/api/embed-proxy', async (req, res) => {
   const rawUrl = req.query.url
   if (!rawUrl) return res.status(400).json({ error: 'Missing url parameter' })
-  if (!isAllowedProxyUrl(rawUrl)) {
+  if (!isSafeProxyUrl(rawUrl)) {
     console.log(`[proxy] blocked: ${rawUrl.slice(0, 80)}`)
-    return res.status(403).json({ error: 'Domain not in allowlist' })
+    return res.status(403).json({ error: 'Blocked' })
   }
 
   try {
@@ -304,17 +297,9 @@ app.get('/api/req-proxy', async (req, res) => {
   const referer = req.query.ref || ''
   if (!rawUrl) return res.status(400).end()
 
+  if (!isSafeProxyUrl(rawUrl)) return res.status(403).end()
   let targetOrigin
-  try {
-    targetOrigin = new URL(rawUrl).origin
-    const h = new URL(rawUrl).hostname
-    // Basic SSRF protection
-    if (h === 'localhost' || /^127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./.test(h)) {
-      return res.status(403).end()
-    }
-  } catch (_) {
-    return res.status(400).end()
-  }
+  try { targetOrigin = new URL(rawUrl).origin } catch (_) { return res.status(400).end() }
 
   try {
     const r = await fetch(rawUrl, {
