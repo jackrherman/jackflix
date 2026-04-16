@@ -99,18 +99,19 @@ function isAllowedProxyUrl(rawUrl) {
 }
 
 // Script injected into every proxied HTML page.
-// • Saves a reference to the real parent window before overriding frame-detection props.
-// • Overrides window.top/parent/self so the embed thinks it is not inside an iframe.
-// • Intercepts XHR and fetch; any .m3u8 URL is postMessaged up to the real parent.
-// • Relays jf-stream messages from child frames upward so multi-iframe chains work.
-// • Rewrites iframe src/data-src assignments to route child frames through our proxy.
+// 1. Saves real parent ref, overrides window.top/parent/self (anti-frame-bust).
+// 2. Intercepts XHR + fetch — routes all cross-origin requests through /api/req-proxy
+//    so the server makes them with spoofed Origin/Referer (bypasses CORS).
+// 3. Resolves relative URLs against the embed base URL (JS doesn't use <base>).
+// 4. Scans both request URLs and response bodies for .m3u8 URLs.
+// 5. Relays jf-stream messages from child frames upward (multi-iframe chains).
+// 6. Rewrites iframe src assignments through /api/embed-proxy (recursive proxy).
 const INJECTED_SCRIPT = `<script>
 (function () {
-  // Save real parent reference BEFORE overriding window.parent
+  // 1. Save real parent reference BEFORE overriding window.parent
   var _P = null
   try { if (window.parent !== window) _P = window.parent } catch (e) {}
 
-  // Override frame-detection properties so embed scripts don't bust the frame
   try {
     var _dP = Object.defineProperty, _w = window
     _dP(_w, 'top',    { get: function () { return _w }, configurable: true })
@@ -118,35 +119,86 @@ const INJECTED_SCRIPT = `<script>
     _dP(_w, 'self',   { get: function () { return _w }, configurable: true })
   } catch (e) {}
 
+  // 2. Stream URL detection
   function report(url) {
-    if (!url || url.indexOf('.m3u8') === -1) return
+    if (!url || typeof url !== 'string' || url.indexOf('.m3u8') === -1) return
     if (url.indexOf('subtitle') !== -1 || url.indexOf('caption') !== -1 || url.indexOf('.vtt') !== -1) return
     var msg = { type: 'jf-stream', url: url, ref: location.href }
     if (_P) try { _P.postMessage(msg, '*') } catch (e) {}
   }
 
-  // Relay jf-stream messages from deeper child frames up to our real parent
+  function scanText(text) {
+    if (!text) return
+    var m = text.match(/https?:\\/\\/[^"'\\s\\\\]+\\.m3u8[^"'\\s\\\\]*/i)
+    if (m) report(m[0])
+  }
+
+  // 3. Relay messages from deeper child frames
   window.addEventListener('message', function (e) {
     if (_P && e.data && e.data.type === 'jf-stream') try { _P.postMessage(e.data, '*') } catch (e2) {}
   })
 
-  // Intercept XHR
+  // 4. URL helpers — JS doesn't respect <base>, so we resolve relative URLs manually
+  var _EMBED_BASE = ''
+  try { var _b = document.querySelector('base'); if (_b && _b.href) _EMBED_BASE = _b.href } catch (e) {}
+
+  function _resolve(u) {
+    if (!u || typeof u !== 'string') return u || ''
+    if (/^https?:\\/\\//.test(u)) return u
+    if (!_EMBED_BASE) return u
+    try { return new URL(u, _EMBED_BASE).href } catch (e) { return u }
+  }
+
+  function _shouldProxy(u) {
+    if (!u) return false
+    try {
+      return new URL(u).origin !== location.origin && u.indexOf('/api/req-proxy') === -1
+    } catch (e) { return false }
+  }
+
+  function _toReqProxy(u) {
+    return '/api/req-proxy?url=' + encodeURIComponent(u) + '&ref=' + encodeURIComponent(_EMBED_BASE || location.href)
+  }
+
+  // 5. XHR intercept — resolve URL, proxy cross-origin, scan response body
   var _xo = XMLHttpRequest.prototype.open
   XMLHttpRequest.prototype.open = function (m, u) {
-    report(String(u || ''))
-    return _xo.apply(this, arguments)
+    var abs = _resolve(String(u || ''))
+    report(abs)
+    var routed = _shouldProxy(abs) ? _toReqProxy(abs) : (abs || u)
+    return _xo.apply(this, [m, routed].concat(Array.prototype.slice.call(arguments, 2)))
   }
 
-  // Intercept fetch
+  var _xs = XMLHttpRequest.prototype.send
+  XMLHttpRequest.prototype.send = function (body) {
+    this.addEventListener('readystatechange', function () {
+      if (this.readyState === 4) try { scanText(this.responseText) } catch (e) {}
+    })
+    return _xs.apply(this, arguments)
+  }
+
+  // 6. fetch intercept — resolve URL, proxy cross-origin, scan response body
   var _f = window.fetch
-  window.fetch = function (input) {
-    report(typeof input === 'string' ? input : ((input && input.url) || ''))
-    return _f.apply(window, arguments)
+  window.fetch = function (input, init) {
+    var u = typeof input === 'string' ? input : ((input && input.url) || '')
+    var abs = _resolve(u)
+    report(abs)
+    var routed = _shouldProxy(abs) ? _toReqProxy(abs) : abs
+    var finalInput = typeof input === 'string' ? routed : routed
+    return _f.call(window, finalInput, init).then(function (resp) {
+      var ct = resp.headers.get('content-type') || ''
+      if (ct.indexOf('json') !== -1 || ct.indexOf('javascript') !== -1 || ct.indexOf('text/plain') !== -1) {
+        resp.clone().text().then(function (t) { scanText(t) }).catch(function () {})
+      }
+      return resp
+    })
   }
 
-  // Route child iframe src through our proxy so recursive frames are also intercepted
+  // 7. Iframe src rewrite — route child frames through embed proxy (recursive)
   function _proxyIframe(v) {
-    if (v && /^https?:\\/\\//.test(v)) return '/api/embed-proxy?url=' + encodeURIComponent(v)
+    if (v && /^https?:\\/\\//.test(v) && v.indexOf('/api/embed-proxy') === -1) {
+      return '/api/embed-proxy?url=' + encodeURIComponent(v)
+    }
     return v
   }
   try {
@@ -163,7 +215,7 @@ const INJECTED_SCRIPT = `<script>
     return _sa.call(this, n, v)
   }
 
-  // DOM observer: catch m3u8 URLs set directly on <video> / <source> elements
+  // 8. Video/source observer
   try {
     new MutationObserver(function () {
       document.querySelectorAll('video[src], source[src]').forEach(function (el) {
@@ -238,6 +290,52 @@ app.get('/api/embed-proxy', async (req, res) => {
   } catch (e) {
     console.error('[proxy] error:', e.message)
     res.status(502).json({ error: e.message })
+  }
+})
+
+// ── REQUEST PROXY ─────────────────────────────────────────────────────────────
+// Proxies individual XHR/fetch calls from the injected script.
+// The server makes the request with spoofed Origin/Referer so the embed site's
+// API thinks the call is same-origin. This bypasses CORS without needing the
+// user's browser to make cross-origin requests.
+
+app.get('/api/req-proxy', async (req, res) => {
+  const rawUrl  = req.query.url
+  const referer = req.query.ref || ''
+  if (!rawUrl) return res.status(400).end()
+
+  let targetOrigin
+  try {
+    targetOrigin = new URL(rawUrl).origin
+    const h = new URL(rawUrl).hostname
+    // Basic SSRF protection
+    if (h === 'localhost' || /^127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./.test(h)) {
+      return res.status(403).end()
+    }
+  } catch (_) {
+    return res.status(400).end()
+  }
+
+  try {
+    const r = await fetch(rawUrl, {
+      headers: {
+        'User-Agent':       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept':           '*/*',
+        'Accept-Language':  'en-US,en;q=0.5',
+        'Origin':           targetOrigin,
+        'Referer':          referer || targetOrigin + '/',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      redirect: 'follow',
+    })
+
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Content-Type', r.headers.get('content-type') || 'application/octet-stream')
+    const buf = await r.arrayBuffer()
+    res.send(Buffer.from(buf))
+  } catch (e) {
+    console.error('[req-proxy]', e.message)
+    res.status(502).end()
   }
 })
 
