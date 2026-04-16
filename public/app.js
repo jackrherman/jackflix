@@ -95,31 +95,166 @@ function checkAuth() {
   }
 }
 
+const AVATAR_COLORS = ['#e50914','#0070f3','#10b981','#8b5cf6','#f59e0b','#ec4899','#06b6d4','#84cc16']
+
+let _manageMode = false
+
 async function showLoginScreen() {
   const screen = document.getElementById('loginScreen')
   screen.classList.remove('hidden')
-
-  // Fetch profiles from server and build cards
-  try {
-    const res      = await fetch('/api/profiles')
-    const profiles = await res.json()
-    const cards    = document.getElementById('profileCards')
-    cards.innerHTML = ''
-    profiles.forEach(p => {
-      const card = document.createElement('div')
-      card.className = 'profile-card'
-      card.innerHTML = `
-        <div class="profile-avatar">${p.name[0].toUpperCase()}</div>
-        <div class="profile-name">${p.name}</div>
-      `
-      card.addEventListener('click', () => showPinScreen(p))
-      cards.appendChild(card)
-    })
-  } catch(_) {}
+  _manageMode = false
+  await refreshProfileCards()
 
   buildPinKeypad()
   document.getElementById('pinBack').addEventListener('click', showProfilePicker)
   document.addEventListener('keydown', onPinKeydown)
+}
+
+async function refreshProfileCards() {
+  const cards = document.getElementById('profileCards')
+  cards.innerHTML = ''
+
+  let profiles = []
+  try {
+    const res = await fetch('/api/profiles')
+    profiles  = await res.json()
+  } catch(_) {}
+
+  profiles.forEach(p => {
+    const card  = document.createElement('div')
+    card.className = 'profile-card'
+    const color = AVATAR_COLORS[p.avatar || 0]
+    card.innerHTML = `
+      <div class="profile-avatar" style="background:${color}">${p.name[0].toUpperCase()}</div>
+      <div class="profile-name">${p.name}</div>
+      ${_manageMode ? `<button class="profile-delete-btn" data-id="${p.id}">✕</button>` : ''}
+    `
+    if (_manageMode) {
+      card.querySelector('.profile-delete-btn').addEventListener('click', async e => {
+        e.stopPropagation()
+        if (!confirm(`Delete profile "${p.name}"?`)) return
+        await fetch(`/api/profiles/${p.id}`, { method: 'DELETE' })
+        await refreshProfileCards()
+      })
+    } else {
+      card.addEventListener('click', () => {
+        if (p.hasPin) { showPinScreen(p) } else { loginDirect(p) }
+      })
+    }
+    cards.appendChild(card)
+  })
+
+  // + Add Profile card
+  const addCard = document.createElement('div')
+  addCard.className = 'profile-card profile-card-add'
+  addCard.innerHTML = `<div class="profile-avatar profile-avatar-add">+</div><div class="profile-name">Add Profile</div>`
+  addCard.addEventListener('click', showCreateProfileModal)
+  cards.appendChild(addCard)
+
+  // Manage / Done toggle
+  const existing = document.getElementById('manageProfilesBtn')
+  if (existing) existing.remove()
+  if (profiles.length > 0) {
+    const btn = document.createElement('button')
+    btn.id        = 'manageProfilesBtn'
+    btn.className = 'manage-profiles-btn'
+    btn.textContent = _manageMode ? 'Done' : 'Manage Profiles'
+    btn.addEventListener('click', () => { _manageMode = !_manageMode; refreshProfileCards() })
+    document.getElementById('profilePicker').appendChild(btn)
+  }
+}
+
+async function loginDirect(profile) {
+  try {
+    const res = await fetch('/api/auth', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ profileId: profile.id }),
+    })
+    if (res.ok) {
+      const { token } = await res.json()
+      localStorage.setItem('jf_token', token)
+      serverToken = token
+      document.removeEventListener('keydown', onPinKeydown)
+      document.getElementById('loginScreen').classList.add('hidden')
+      init()
+    }
+  } catch(_) {}
+}
+
+function showCreateProfileModal() {
+  let modal = document.getElementById('createProfileModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id        = 'createProfileModal'
+    modal.className = 'create-profile-modal'
+    modal.innerHTML = `
+      <div class="create-profile-inner">
+        <h2 class="create-profile-title">Create Profile</h2>
+        <input type="text" class="create-profile-input" id="newProfileName" placeholder="Enter name" maxlength="20">
+        <div class="avatar-picker-label">Choose colour</div>
+        <div class="avatar-picker" id="avatarPicker">
+          ${AVATAR_COLORS.map((c, i) => `<button class="avatar-swatch${i===0?' selected':''}" data-i="${i}" style="background:${c}"></button>`).join('')}
+        </div>
+        <div class="pin-toggle-wrap">
+          <label class="pin-toggle-label">
+            <input type="checkbox" id="newProfilePinCheck"> Add a PIN
+          </label>
+          <div class="pin-new-inputs hidden" id="newProfilePinInputs">
+            <input type="password" class="create-profile-input" id="newProfilePin" placeholder="4-digit PIN" maxlength="4" pattern="[0-9]*" inputmode="numeric">
+          </div>
+        </div>
+        <div class="create-profile-actions">
+          <button class="create-profile-btn create-profile-btn-cancel" id="createProfileCancel">Cancel</button>
+          <button class="create-profile-btn create-profile-btn-save"   id="createProfileSave">Create</button>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+
+    modal.querySelectorAll('.avatar-swatch').forEach(sw => {
+      sw.addEventListener('click', () => {
+        modal.querySelectorAll('.avatar-swatch').forEach(s => s.classList.remove('selected'))
+        sw.classList.add('selected')
+      })
+    })
+
+    document.getElementById('newProfilePinCheck').addEventListener('change', function() {
+      document.getElementById('newProfilePinInputs').classList.toggle('hidden', !this.checked)
+    })
+
+    document.getElementById('createProfileCancel').addEventListener('click', () => modal.classList.add('hidden'))
+
+    document.getElementById('createProfileSave').addEventListener('click', async () => {
+      const name   = document.getElementById('newProfileName').value.trim()
+      if (!name) { document.getElementById('newProfileName').focus(); return }
+      const avatar = parseInt(modal.querySelector('.avatar-swatch.selected').dataset.i, 10)
+      const usePIN = document.getElementById('newProfilePinCheck').checked
+      const pin    = usePIN ? document.getElementById('newProfilePin').value.trim() : null
+      if (usePIN && (!pin || !/^\d{4}$/.test(pin))) {
+        document.getElementById('newProfilePin').focus(); return
+      }
+      const body = { name, avatar }
+      if (pin) body.pin = pin
+      try {
+        const res = await fetch('/api/profiles', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        })
+        if (res.ok) {
+          modal.classList.add('hidden')
+          document.getElementById('newProfileName').value = ''
+          document.getElementById('newProfilePin').value = ''
+          document.getElementById('newProfilePinCheck').checked = false
+          document.getElementById('newProfilePinInputs').classList.add('hidden')
+          await refreshProfileCards()
+        }
+      } catch(_) {}
+    })
+  }
+  modal.classList.remove('hidden')
+  document.getElementById('newProfileName').focus()
 }
 
 function onPinKeydown(e) {

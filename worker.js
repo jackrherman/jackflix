@@ -149,17 +149,28 @@ function corsHeaders(extra = {}) {
 const VPS_BASE   = 'http://107.175.245.21.nip.io'
 const VPS_SECRET = 'jf-rn-2026-xK9mP'
 
-async function forwardToVPS(pathname, searchParams) {
-  const qs  = searchParams.toString()
+async function forwardToVPS(pathname, searchParams, originalRequest = null) {
+  const qs     = searchParams.toString()
   const vpsUrl = `${VPS_BASE}${pathname}${qs ? '?' + qs : ''}`
   try {
-    const r = await fetch(vpsUrl, {
-      headers: { 'x-jf-secret': VPS_SECRET },
+    const opts = {
+      method:   originalRequest ? originalRequest.method : 'GET',
+      headers:  { 'x-jf-secret': VPS_SECRET },
       redirect: 'follow',
-    })
+    }
+    if (originalRequest) {
+      const ct   = originalRequest.headers.get('content-type')
+      const auth = originalRequest.headers.get('authorization')
+      if (ct)   opts.headers['Content-Type']   = ct
+      if (auth) opts.headers['Authorization']  = auth
+      if (!['GET', 'HEAD'].includes(opts.method)) {
+        opts.body = await originalRequest.arrayBuffer()
+      }
+    }
+    const r   = await fetch(vpsUrl, opts)
     const buf = await r.arrayBuffer()
     return new Response(buf, {
-      status: r.status,
+      status:  r.status,
       headers: {
         'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
         ...corsHeaders(),
@@ -167,7 +178,7 @@ async function forwardToVPS(pathname, searchParams) {
     })
   } catch (e) {
     return new Response(JSON.stringify({ error: e.message }), {
-      status: 502,
+      status:  502,
       headers: { 'Content-Type': 'application/json', ...corsHeaders() },
     })
   }
@@ -187,6 +198,10 @@ export default {
     if (url.pathname === '/api/embed-proxy') return forwardToVPS('/api/embed-proxy', url.searchParams)
     if (url.pathname === '/api/req-proxy')   return forwardToVPS('/api/req-proxy',   url.searchParams)
     if (url.pathname === '/api/resolve')     return forwardToVPS('/api/resolve',     url.searchParams)
+    if (url.pathname === '/api/profiles' || url.pathname.startsWith('/api/profiles/'))
+      return forwardToVPS(url.pathname, url.searchParams, request)
+    if (url.pathname === '/api/auth') return forwardToVPS('/api/auth', url.searchParams, request)
+    if (url.pathname === '/api/cw')   return forwardToVPS('/api/cw',   url.searchParams, request)
 
     return new Response('JackFlix Proxy Worker — OK (VPS backend)', {
       status: 200,

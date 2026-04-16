@@ -1,10 +1,11 @@
 'use strict'
-const http = require('http')
-const https = require('https')
-const url = require('url')
+const http   = require('http')
+const https  = require('https')
+const url    = require('url')
+const crypto = require('crypto')
 
 const SECRET = 'jf-rn-2026-xK9mP'
-const PORT = 80
+const PORT   = 80
 
 // ── COOKIE JAR ────────────────────────────────────────────────────────────────
 // Stores cookies per-hostname so Turnstile verification persists across requests.
@@ -52,6 +53,61 @@ function getCookies(hostname) {
   const jar = cookieJar.get(hostname)
   if (!jar || !Object.keys(jar).length) return ''
   return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ')
+}
+
+// ── PROFILES / AUTH / CW ──────────────────────────────────────────────────────
+
+const JWT_SECRET    = 'jf-jwt-2026-xK9mP7'
+const PROFILES_FILE = '/opt/jackflix-proxy/profiles.json'
+const CW_FILE       = '/opt/jackflix-proxy/cw.json'
+
+let profilesStore = {}
+let cwDb          = {}
+
+function loadAppData() {
+  try { profilesStore = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')) } catch (_) {}
+  try { cwDb          = JSON.parse(fs.readFileSync(CW_FILE,       'utf8')) } catch (_) {}
+}
+
+function saveProfiles() {
+  try { fs.writeFileSync(PROFILES_FILE, JSON.stringify(profilesStore)) } catch (_) {}
+}
+
+function saveCW() {
+  try { fs.writeFileSync(CW_FILE, JSON.stringify(cwDb)) } catch (_) {}
+}
+
+loadAppData()
+
+function b64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function jwtSign(payload) {
+  const hdr  = b64url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })))
+  const body = b64url(Buffer.from(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 30 * 24 * 3600 })))
+  const sig  = b64url(crypto.createHmac('sha256', JWT_SECRET).update(`${hdr}.${body}`).digest())
+  return `${hdr}.${body}.${sig}`
+}
+
+function jwtVerify(token) {
+  const p = (token || '').split('.')
+  if (p.length !== 3) throw new Error('bad token')
+  const sig = b64url(crypto.createHmac('sha256', JWT_SECRET).update(`${p[0]}.${p[1]}`).digest())
+  if (sig !== p[2]) throw new Error('bad sig')
+  const pl = JSON.parse(Buffer.from(p[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString())
+  if (pl.exp < Math.floor(Date.now() / 1000)) throw new Error('expired')
+  return pl
+}
+
+function hashPin(pin) {
+  return crypto.createHmac('sha256', 'jf-pin-salt-2026').update(String(pin)).digest('hex')
+}
+
+function readBody(req, cb) {
+  const chunks = []
+  req.on('data', c => chunks.push(c))
+  req.on('end', () => cb(Buffer.concat(chunks).toString('utf8')))
 }
 
 // ── INJECTED SCRIPT ───────────────────────────────────────────────────────────
@@ -224,8 +280,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(403); res.end('Forbidden'); return
   }
   const parsed = url.parse(req.url, true)
-  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Origin',  '*')
   res.setHeader('Access-Control-Allow-Headers', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204); res.end(); return
@@ -342,6 +399,80 @@ const server = http.createServer((req, res) => {
         res.end(Buffer.concat(chunks))
       })
     })
+  // ── PROFILES ────────────────────────────────────────────────────────────────
+  } else if (parsed.pathname === '/api/profiles' && req.method === 'GET') {
+    const list = Object.values(profilesStore).map(p => ({ id: p.id, name: p.name, avatar: p.avatar || 0, hasPin: !!p.pinHash }))
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+    res.end(JSON.stringify(list))
+
+  } else if (parsed.pathname === '/api/profiles' && req.method === 'POST') {
+    readBody(req, raw => {
+      try {
+        const { name, avatar, pin } = JSON.parse(raw)
+        if (!name || typeof name !== 'string' || !name.trim()) { res.writeHead(400); res.end(JSON.stringify({ error: 'Name required' })); return }
+        const id = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_') + '_' + Date.now()
+        profilesStore[id] = {
+          id,
+          name:    name.trim().slice(0, 20),
+          avatar:  typeof avatar === 'number' ? Math.max(0, Math.min(7, avatar)) : 0,
+          pinHash: pin ? hashPin(String(pin)) : null,
+        }
+        saveProfiles()
+        const p = profilesStore[id]
+        res.writeHead(201, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+        res.end(JSON.stringify({ id: p.id, name: p.name, avatar: p.avatar, hasPin: !!p.pinHash }))
+      } catch (_) { res.writeHead(400); res.end(JSON.stringify({ error: 'Bad request' })) }
+    })
+
+  } else if (parsed.pathname.startsWith('/api/profiles/') && req.method === 'DELETE') {
+    const id = parsed.pathname.slice('/api/profiles/'.length)
+    if (profilesStore[id]) { delete profilesStore[id]; saveProfiles() }
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*' }); res.end()
+
+  // ── AUTH ─────────────────────────────────────────────────────────────────────
+  } else if (parsed.pathname === '/api/auth' && req.method === 'POST') {
+    readBody(req, raw => {
+      try {
+        const { profileId, pin } = JSON.parse(raw)
+        const profile = profilesStore[profileId]
+        if (!profile) { res.writeHead(401); res.end(JSON.stringify({ error: 'Profile not found' })); return }
+        if (profile.pinHash && hashPin(String(pin || '')) !== profile.pinHash) {
+          res.writeHead(401); res.end(JSON.stringify({ error: 'Wrong PIN' })); return
+        }
+        const token = jwtSign({ profileId: profile.id, name: profile.name })
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+        res.end(JSON.stringify({ token, name: profile.name }))
+      } catch (_) { res.writeHead(400); res.end(JSON.stringify({ error: 'Bad request' })) }
+    })
+
+  // ── CONTINUE WATCHING ────────────────────────────────────────────────────────
+  } else if (parsed.pathname === '/api/cw' && req.method === 'GET') {
+    const auth = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+    let profile
+    try { profile = jwtVerify(auth) } catch (_) { res.writeHead(401); res.end(JSON.stringify({ error: 'Unauthorized' })); return }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' })
+    res.end(JSON.stringify(cwDb[profile.profileId] || {}))
+
+  } else if (parsed.pathname === '/api/cw' && (req.method === 'PUT' || req.method === 'POST')) {
+    const auth = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+    let profile
+    try { profile = jwtVerify(auth) } catch (_) { res.writeHead(401); res.end(JSON.stringify({ error: 'Unauthorized' })); return }
+    readBody(req, raw => {
+      try {
+        const clientCW = JSON.parse(raw)
+        const serverCW = cwDb[profile.profileId] || {}
+        const merged   = { ...serverCW }
+        for (const [key, entry] of Object.entries(clientCW)) {
+          if (!merged[key] || (entry.ts || 0) > (merged[key].ts || 0)) merged[key] = entry
+        }
+        const entries = Object.entries(merged).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))
+        cwDb[profile.profileId] = Object.fromEntries(entries.slice(0, 50))
+        saveCW()
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' })
+        res.end(JSON.stringify(cwDb[profile.profileId]))
+      } catch (_) { res.writeHead(400); res.end(JSON.stringify({ error: 'Bad request' })) }
+    })
+
   } else {
     res.writeHead(200); res.end('JackFlix VPS proxy OK')
   }

@@ -2,8 +2,6 @@
 
 const express = require('express')
 const path    = require('path')
-const crypto  = require('crypto')
-const jwt     = require('jsonwebtoken')
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -12,58 +10,22 @@ const PORT = process.env.PORT || 3000
 
 const TMDB_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4MjVlMzYzYTM3MDRhZDk5MTZlOTE4NzI3OWJjNjRkYyIsIm5iZiI6MTc3NjI4OTMwMC44MzgsInN1YiI6IjY5ZTAwNjE0OWMzOWYzNTRmODAxMmM0MCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.NSmPuuHTY8KGU4GTN4hz8_PVe9bxnXxmlfi5Ce5Co8A'
 
-// ── AUTH CONFIG ───────────────────────────────────────────────────────────────
+// ── VPS PROXY ─────────────────────────────────────────────────────────────────
+// Profiles, auth, and continue-watching are stored centrally on the VPS so both
+// the laptop and TV apps share the same data.
 
-const JWT_SECRET   = process.env.JWT_SECRET  || 'dev-secret-change-me'
-const PBKDF2_SALT  = 'jackflix'
-const PBKDF2_ITERS = 100_000
-const PBKDF2_LEN   = 32
+const VPS_BASE   = 'http://107.175.245.21.nip.io'
+const VPS_SECRET = 'jf-rn-2026-xK9mP'
 
-const PROFILES = {
-  jack: {
-    id:      'jack',
-    name:    'Jack',
-    pinHash: process.env.JACK_PIN_HASH || '',
-  },
-}
-
-// ── CONTINUE WATCHING (in-memory) ─────────────────────────────────────────────
-
-const cwStore = {}
-
-// ── RATE LIMITING ─────────────────────────────────────────────────────────────
-
-const authAttempts = {}
-
-function checkRateLimit(ip) {
-  const now = Date.now()
-  if (!authAttempts[ip]) authAttempts[ip] = []
-  authAttempts[ip] = authAttempts[ip].filter(t => now - t < 60_000)
-  if (authAttempts[ip].length >= 5) return false
-  authAttempts[ip].push(now)
-  return true
-}
-
-// ── PIN HASHING ───────────────────────────────────────────────────────────────
-
-function hashPin(pin) {
-  return new Promise((resolve, reject) =>
-    crypto.pbkdf2(String(pin), PBKDF2_SALT, PBKDF2_ITERS, PBKDF2_LEN, 'sha256',
-      (err, key) => err ? reject(err) : resolve(key.toString('hex'))))
-}
-
-// ── AUTH MIDDLEWARE ───────────────────────────────────────────────────────────
-
-function requireAuth(req, res, next) {
-  const auth  = req.headers.authorization || ''
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
-  try {
-    req.profile = jwt.verify(token, JWT_SECRET)
-    next()
-  } catch(_) {
-    res.status(401).json({ error: 'Invalid or expired token' })
-  }
+async function vpsRequest(method, path, reqBody, authHeader) {
+  const headers = { 'x-jf-secret': VPS_SECRET }
+  if (authHeader)          headers['Authorization'] = authHeader
+  if (reqBody !== null)    headers['Content-Type']  = 'application/json'
+  return fetch(`${VPS_BASE}${path}`, {
+    method,
+    headers,
+    body: reqBody !== null ? JSON.stringify(reqBody) : undefined,
+  })
 }
 
 // ── EMBED PROXY ───────────────────────────────────────────────────────────────
@@ -339,64 +301,38 @@ app.use(express.static(path.join(__dirname, 'public')))
 
 // ── API: PROFILES ─────────────────────────────────────────────────────────────
 
-app.get('/api/profiles', (req, res) => {
-  const list = Object.values(PROFILES).map(p => ({ id: p.id, name: p.name }))
-  res.json(list)
+app.get('/api/profiles', async (req, res) => {
+  try { const r = await vpsRequest('GET', '/api/profiles', null, null); res.status(r.status).json(await r.json()) }
+  catch (e) { res.status(502).json({ error: e.message }) }
+})
+
+app.post('/api/profiles', async (req, res) => {
+  try { const r = await vpsRequest('POST', '/api/profiles', req.body, null); res.status(r.status).json(await r.json()) }
+  catch (e) { res.status(502).json({ error: e.message }) }
+})
+
+app.delete('/api/profiles/:id', async (req, res) => {
+  try { const r = await vpsRequest('DELETE', `/api/profiles/${req.params.id}`, null, null); res.status(r.status).end() }
+  catch (e) { res.status(502).end() }
 })
 
 // ── API: AUTH ─────────────────────────────────────────────────────────────────
 
 app.post('/api/auth', async (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()
-  if (!checkRateLimit(ip)) {
-    return res.status(429).json({ error: 'Too many attempts. Try again in a minute.' })
-  }
-
-  const { profileId, pin } = req.body || {}
-  const profile = PROFILES[String(profileId || '').toLowerCase()]
-  if (!profile || !profile.pinHash) {
-    return res.status(401).json({ error: 'Unknown profile' })
-  }
-
-  try {
-    const hash = await hashPin(pin)
-    if (hash !== profile.pinHash) {
-      return res.status(401).json({ error: 'Wrong PIN' })
-    }
-    const token = jwt.sign(
-      { profileId: profile.id, name: profile.name },
-      JWT_SECRET,
-      { expiresIn: '30d' }
-    )
-    res.json({ token, name: profile.name })
-  } catch(e) {
-    console.error('[auth]', e.message)
-    res.status(500).json({ error: 'Auth error' })
-  }
+  try { const r = await vpsRequest('POST', '/api/auth', req.body, null); res.status(r.status).json(await r.json()) }
+  catch (e) { res.status(502).json({ error: e.message }) }
 })
 
 // ── API: CONTINUE WATCHING ────────────────────────────────────────────────────
 
-app.get('/api/cw', requireAuth, (req, res) => {
-  res.json(cwStore[req.profile.profileId] || {})
+app.get('/api/cw', async (req, res) => {
+  try { const r = await vpsRequest('GET', '/api/cw', null, req.headers.authorization); res.status(r.status).json(await r.json()) }
+  catch (e) { res.status(502).json({ error: e.message }) }
 })
 
-app.put('/api/cw', requireAuth, (req, res) => {
-  const profileId = req.profile.profileId
-  const clientCW  = req.body || {}
-  const serverCW  = cwStore[profileId] || {}
-
-  const merged = { ...serverCW }
-  for (const [key, entry] of Object.entries(clientCW)) {
-    if (!merged[key] || (entry.ts || 0) > (merged[key].ts || 0)) {
-      merged[key] = entry
-    }
-  }
-
-  const entries = Object.entries(merged).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))
-  cwStore[profileId] = Object.fromEntries(entries.slice(0, 50))
-
-  res.json(cwStore[profileId])
+app.put('/api/cw', async (req, res) => {
+  try { const r = await vpsRequest('PUT', '/api/cw', req.body, req.headers.authorization); res.status(r.status).json(await r.json()) }
+  catch (e) { res.status(502).json({ error: e.message }) }
 })
 
 // ── API: TMDB PROXY ───────────────────────────────────────────────────────────
