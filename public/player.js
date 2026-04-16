@@ -139,13 +139,13 @@ const PROXY_BASE = 'https://jackflix-proxy.jackrherman.workers.dev'
 
 const _embedServers = {
   movie: [
-    id       => `https://vidsrc.to/embed/movie/${id}`,
     id       => `https://www.2embed.cc/embed/${id}`,
+    id       => `https://vidsrc.to/embed/movie/${id}`,
     id       => `https://embed.su/embed/movie/${id}`,
   ],
   tv: [
-    (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
     (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}`,
+    (id,s,e) => `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
     (id,s,e) => `https://embed.su/embed/tv/${id}/${s}/${e}`,
   ],
 }
@@ -233,7 +233,7 @@ function tryServer(serverIndex) {
     cleanupStreamIframe()
     window.removeEventListener('message', msgHandler)
     onTimeout()
-  }, 20_000)
+  }, 40_000)
 
   function msgHandler(e) {
     if (extractionId !== myId) return
