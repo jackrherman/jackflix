@@ -129,6 +129,12 @@ async function loadCWFromServer() {
   } catch(_) {}
 }
 
+// ── PROXY BASE ────────────────────────────────────────────────────────────────
+// Proxy requests go through a Cloudflare Worker (better IPs than Render's AWS).
+// The Worker handles /api/embed-proxy and /api/req-proxy.
+
+const PROXY_BASE = 'https://jackflix-proxy.jackrherman.workers.dev'
+
 // ── EMBED SERVERS ─────────────────────────────────────────────────────────────
 
 const _embedServers = {
@@ -213,7 +219,7 @@ function tryServer(serverIndex) {
     currentPlayer.episode,
     serverIndex,
   )
-  const proxyUrl = '/api/embed-proxy?url=' + encodeURIComponent(embedUrl)
+  const proxyUrl = PROXY_BASE + '/api/embed-proxy?url=' + encodeURIComponent(embedUrl)
 
   const iframe = document.createElement('iframe')
   iframe.id    = 'jf-stream-iframe'
