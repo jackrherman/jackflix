@@ -4,7 +4,7 @@ const https = require('https')
 const url = require('url')
 
 const SECRET = 'jf-rn-2026-xK9mP'
-const PORT = 3000
+const PORT = 80
 
 const INJECTED_SCRIPT = `<script>
 (function () {
