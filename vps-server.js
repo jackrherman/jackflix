@@ -80,7 +80,7 @@ const INJECTED_SCRIPT = `<script>
     if (!/^https?:\/\//.test(v)) {
       try { abs = new URL(v, _EMBED_BASE || location.href).href } catch(e) { return v }
     }
-    return '/api/embed-proxy?url=' + encodeURIComponent(abs) + '&ref=' + encodeURIComponent(location.href)
+    return '/api/embed-proxy?url=' + encodeURIComponent(abs) + '&ref=' + encodeURIComponent(_EMBED_BASE || location.href)
   }
   try {
     var _sd = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src')
@@ -183,7 +183,7 @@ const server = http.createServer((req, res) => {
             try { abs = new URL(u, rawUrl).href } catch (_) { return m }
           }
           if (!isSafe(abs)) return m
-          return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(abs) + q2
+          return pre + q1 + '/api/embed-proxy?url=' + encodeURIComponent(abs) + '&ref=' + encodeURIComponent(rawUrl) + q2
         })
         const base = '<base href="' + rawUrl.replace(/"/g, '%22') + '">'
         const injected = base + INJECTED_SCRIPT
