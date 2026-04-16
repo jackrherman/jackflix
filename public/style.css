@@ -1428,3 +1428,15 @@ body {
 }
 
 .pin-back:hover { color: #fff; }
+
+.app-version {
+  position: fixed;
+  bottom: 10px;
+  right: 12px;
+  font-size: 11px;
+  color: rgba(255,255,255,0.25);
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  z-index: 9999;
+  user-select: none;
+}
