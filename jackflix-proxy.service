@@ -1,0 +1,10 @@
+[Unit]
+Description=JackFlix Proxy
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/jackflix-proxy/server.js
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
