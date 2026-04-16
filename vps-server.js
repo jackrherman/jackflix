@@ -74,10 +74,13 @@ const INJECTED_SCRIPT = `<script>
     })
   }
   function _proxyIframe(v) {
-    if (v && /^https?:\/\//.test(v) && v.indexOf('/api/embed-proxy') === -1) {
-      return '/api/embed-proxy?url=' + encodeURIComponent(v)
+    if (!v || typeof v !== 'string') return v
+    if (v.indexOf('/api/embed-proxy') !== -1) return v
+    var abs = v
+    if (!/^https?:\/\//.test(v)) {
+      try { abs = new URL(v, _EMBED_BASE || location.href).href } catch(e) { return v }
     }
-    return v
+    return '/api/embed-proxy?url=' + encodeURIComponent(abs) + '&ref=' + encodeURIComponent(location.href)
   }
   try {
     var _sd = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src')
@@ -149,12 +152,17 @@ const server = http.createServer((req, res) => {
 
   if (parsed.pathname === '/api/embed-proxy') {
     const rawUrl = parsed.query.url
+    const embedRef = parsed.query.ref || ''
     if (!rawUrl || !isSafe(rawUrl)) { res.writeHead(400); res.end('Bad url'); return }
+    let embedReferer = 'https://www.google.com/'
+    if (embedRef) {
+      try { embedReferer = new URL(embedRef).href } catch (_) {}
+    }
     fetchUrl(rawUrl, {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
       'Accept-Language': 'en-US,en;q=0.5',
-      'Referer': 'https://www.google.com/',
+      'Referer': embedReferer,
     }, (upstream, err) => {
       if (err || !upstream) { res.writeHead(502); res.end('Upstream error: ' + (err && err.message)); return }
       let chunks = []
