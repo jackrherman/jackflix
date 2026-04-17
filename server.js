@@ -335,6 +335,18 @@ app.put('/api/cw', async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }) }
 })
 
+// ── API: RESOLVE (stream URL lookup) ─────────────────────────────────────────
+
+app.get('/api/resolve', async (req, res) => {
+  try {
+    const qs = new URLSearchParams(req.query).toString()
+    const r  = await vpsRequest('GET', '/api/resolve' + (qs ? '?' + qs : ''), null, null)
+    res.status(r.status).json(await r.json())
+  } catch(e) {
+    res.status(502).json({ error: e.message })
+  }
+})
+
 // ── API: TMDB PROXY ───────────────────────────────────────────────────────────
 
 app.get('/api/tmdb/*', async (req, res) => {
